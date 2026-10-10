@@ -25,6 +25,7 @@ from release_metadata import (
     release_notes,
     validate_assets,
 )
+from scripts.prepare_release import prepare_release
 
 type Runner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -693,13 +694,14 @@ def main() -> None:
     parser.add_argument("--notes-file", type=Path, required=True)
     args = parser.parse_args()
     try:
-        metadata = read_metadata(ROOT, args.tag)
         response = run_command(["git", "-C", str(ROOT), "rev-parse", "HEAD"])
         if response.returncode != 0:
             raise ValueError("Could not inspect the release checkout.")
         commit = validate_commit(
             response.stdout.strip(), args.event_sha, args.tested_sha
         )
+        prepare_release(ROOT, args.tag)
+        metadata = read_metadata(ROOT, args.tag)
         assets = expected_assets(args.dist, metadata)
         args.notes_file.write_text(release_notes(metadata))
         publish(GitHub(args.repo), metadata, args.tag, assets, args.notes_file, commit)

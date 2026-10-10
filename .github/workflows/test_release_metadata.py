@@ -138,6 +138,33 @@ def test_reject_wrong_or_unsafe_tag(
         read_metadata(root, tag)
 
 
+@pytest.mark.parametrize("tag", ["v1.2.3b5", "v1.2.3"])
+def test_valid_mismatched_tag_reports_actual_and_expected_versions(
+    release: tuple[Path, Path, ReleaseMetadata], tag: str
+) -> None:
+    root, _, _ = release
+    with pytest.raises(ValueError) as failure:
+        read_metadata(root, tag)
+    message = str(failure.value)
+    assert f"Release tag {tag}" in message
+    assert "integration version 1.2.3b4" in message
+    assert "expected v1.2.3b4" in message
+    assert f"--prepare --tag {tag}" in message
+
+
+@pytest.mark.parametrize(
+    "tag", ["v1.2.3b4\nprivate-text", "v1.2.3b4;echo private-text", "1.2.3b4"]
+)
+def test_malformed_tag_error_does_not_reflect_unvalidated_input(
+    release: tuple[Path, Path, ReleaseMetadata], tag: str
+) -> None:
+    root, _, _ = release
+    with pytest.raises(ValueError) as failure:
+        read_metadata(root, tag)
+    assert str(failure.value) == "Release tag must be vX.Y.Z or vX.Y.ZbN."
+    assert tag not in str(failure.value)
+
+
 @pytest.mark.parametrize(
     "version", ["01.2.3", "1.2.3b0", "1.2.3a1", "1.2.3rc1", "1.2.3.dev1", "1.2.3.post1"]
 )
@@ -203,6 +230,73 @@ def test_release_workflow_accepts_matching_version_tag(
     assert "Find IPGUARD in HACS" in notes.read_text()
 
 
+@pytest.mark.parametrize("tag", ["v1.2.3b5", "v1.2.3"])
+def test_release_preparation_derives_versions_and_flags_from_tag(
+    release: tuple[Path, Path, ReleaseMetadata],
+    monkeypatch: pytest.MonkeyPatch,
+    tag: str,
+) -> None:
+    root, _, _ = release
+    output = root / "github-output"
+    sdk_source = (root / "ipguard-api/pyproject.toml").read_bytes()
+    monkeypatch.setattr(release_metadata, "ROOT", root)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "release_metadata.py",
+            "--prepare",
+            "--tag",
+            tag,
+            "--ref-type",
+            "tag",
+            "--github-output",
+            str(output),
+        ],
+    )
+    release_metadata.main()
+    metadata = read_metadata(root, tag)
+    assert metadata.version == tag[1:]
+    assert metadata.sdk_version == "2.3.4"
+    assert (root / "ipguard-api/pyproject.toml").read_bytes() == sdk_source
+    assert output.read_text() == (
+        f"version={tag[1:]}\nsdk_version=2.3.4\n"
+        f"prerelease={str('b' in tag).lower()}\nlatest={str('b' not in tag).lower()}\n"
+    )
+
+
+@pytest.mark.parametrize("tag", ["v1.2.3b0", "1.2.3b5", "v1.2.3b5\nunsafe"])
+def test_invalid_preparation_tag_changes_no_sources_or_outputs(
+    release: tuple[Path, Path, ReleaseMetadata],
+    monkeypatch: pytest.MonkeyPatch,
+    tag: str,
+) -> None:
+    root, _, _ = release
+    names = (
+        "pyproject.toml",
+        "custom_components/ipguard/manifest.json",
+        "uv.lock",
+    )
+    before = {name: (root / name).read_bytes() for name in names}
+    output = root / "github-output"
+    monkeypatch.setattr(release_metadata, "ROOT", root)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "release_metadata.py",
+            "--prepare",
+            "--tag",
+            tag,
+            "--github-output",
+            str(output),
+        ],
+    )
+    with pytest.raises(SystemExit) as failure:
+        release_metadata.main()
+    assert failure.value.code == 1
+    assert before == {name: (root / name).read_bytes() for name in names}
+    assert not output.exists()
+
+
 @pytest.mark.parametrize(
     "ref_type,tag",
     [
@@ -221,6 +315,14 @@ def test_release_workflow_rejects_non_tag_refs_before_metadata_or_outputs(
     tag: str,
 ) -> None:
     root, dist, _ = release
+    before = {
+        name: (root / name).read_bytes()
+        for name in (
+            "pyproject.toml",
+            "custom_components/ipguard/manifest.json",
+            "uv.lock",
+        )
+    }
     outputs = [
         root / "github-output",
         root / "release-notes.md",
@@ -237,6 +339,7 @@ def test_release_workflow_rejects_non_tag_refs_before_metadata_or_outputs(
         "sys.argv",
         [
             "release_metadata.py",
+            "--prepare",
             "--ref-type",
             ref_type,
             "--tag",
@@ -259,6 +362,7 @@ def test_release_workflow_rejects_non_tag_refs_before_metadata_or_outputs(
     assert captured.out == ""
     assert "Release workflows must run against a version tag." in captured.err
     assert all(not output.exists() for output in outputs)
+    assert before == {name: (root / name).read_bytes() for name in before}
 
 
 @pytest.mark.parametrize(

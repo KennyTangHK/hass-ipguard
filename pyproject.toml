@@ -4,11 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ha-ipguard"
-version = "0.1.0b3"
+# Development snapshot; release workflows generate this from the pushed tag.
+version = "0.1.0b4"
 description = "IPGUARD cloud door-release buttons and incoming call events for Home Assistant"
 readme = "README.md"
 requires-python = ">=3.14.2,<3.15"
 license = "Apache-2.0"
+# Automatically synchronized from the independent SDK's package metadata.
 dependencies = ["ipguard-api==0.1.0b3"]
 
 [project.urls]

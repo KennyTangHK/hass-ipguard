@@ -72,11 +72,11 @@ jobs:
             exit 1
           fi
           echo "sha=$checkout_sha" >> "$GITHUB_OUTPUT"
-      - name: Validate project and release metadata
+      - name: Prepare and validate project and release metadata
         id: metadata
         env:
           RELEASE_TAG: ${{ inputs.expected-tag }}
-        run: python .github/workflows/release_metadata.py --tag "$RELEASE_TAG" --github-output "$GITHUB_OUTPUT"
+        run: python .github/workflows/release_metadata.py --prepare --tag "$RELEASE_TAG" --github-output "$GITHUB_OUTPUT"
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "0.12.24"

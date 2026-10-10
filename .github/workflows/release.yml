@@ -26,13 +26,13 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version-file: .python-version
-      - name: Require a matching release version
+      - name: Prepare and validate the selected release version
         env:
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_REF_TYPE: ${{ github.ref_type }}
         run: |
           python3 .github/workflows/release_metadata.py \
-            --tag "$RELEASE_TAG" --ref-type "$RELEASE_REF_TYPE"
+            --prepare --tag "$RELEASE_TAG" --ref-type "$RELEASE_REF_TYPE"
 
   checks:
     name: Validate and build this tag
@@ -64,12 +64,12 @@ jobs:
           name: ${{ needs.checks.outputs.artifact-name }}
           path: dist
           digest-mismatch: error
-      - name: Revalidate metadata, assets, and checksums before publishing
+      - name: Prepare metadata and verify assets and checksums before publishing
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           python3 .github/workflows/release_metadata.py \
-            --tag "$RELEASE_TAG" --dist dist
+            --prepare --tag "$RELEASE_TAG" --dist dist
       - name: Validate the pinned draft, reuse or upload assets, then publish
         env:
           GH_TOKEN: ${{ github.token }}

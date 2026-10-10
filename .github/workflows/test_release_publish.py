@@ -46,6 +46,67 @@ def assets(tmp_path: Path) -> dict[str, Asset]:
     return result
 
 
+@pytest.fixture
+def publisher_root(tmp_path: Path) -> Path:
+    root = tmp_path / "repository"
+    (root / "ipguard-api").mkdir(parents=True)
+    (root / "custom_components/ipguard").mkdir(parents=True)
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "ha-ipguard"\nversion = "0.1.0b1"\n'
+        'dependencies = ["ipguard-api==0.1.0b1"]\n'
+    )
+    (root / "ipguard-api/pyproject.toml").write_text(
+        '[project]\nname = "ipguard-api"\nversion = "0.1.0b3"\n'
+    )
+    (root / "custom_components/ipguard/manifest.json").write_text(
+        json.dumps(
+            {
+                "domain": "ipguard",
+                "version": "0.1.0b1",
+                "requirements": ["ipguard-api==0.1.0b1"],
+            }
+        )
+        + "\n"
+    )
+    (root / "hacs.json").write_text(
+        json.dumps({"filename": "ipguard.zip", "zip_release": True}) + "\n"
+    )
+    (root / "uv.lock").write_text(
+        'version = 1\n\n[[package]]\nname = "ha-ipguard"\n'
+        'version = "0.1.0b1"\nsource = { editable = "." }\n'
+        'dependencies = [{ name = "ipguard-api" }]\n\n'
+        "[package.metadata]\n"
+        'requires-dist = [{ name = "ipguard-api", editable = "ipguard-api" }]\n\n'
+        '[[package]]\nname = "ipguard-api"\nversion = "0.1.0b1"\n'
+        'source = { editable = "ipguard-api" }\n'
+    )
+    return root
+
+
+def invoke_main(monkeypatch, root, *, tag=TAG, event=COMMIT, tested=COMMIT):
+    monkeypatch.setattr(release_publish, "ROOT", root)
+    monkeypatch.setattr(
+        release_publish.sys,
+        "argv",
+        [
+            "release_publish.py",
+            "--tag",
+            tag,
+            "--repo",
+            REPO,
+            "--event-sha",
+            event,
+            "--tested-sha",
+            tested,
+            "--dist",
+            str(root / "dist"),
+            "--notes-file",
+            str(root / "release-notes.md"),
+        ],
+    )
+    release_publish.main()
+
+
 def remote(assets: dict[str, Asset]) -> list[dict[str, object]]:
     return [
         {
@@ -620,6 +681,144 @@ def test_checkout_event_and_tested_commit_must_match(event, tested):
     with pytest.raises(ValueError):
         validate_commit(COMMIT, event, tested)
     assert validate_commit(COMMIT, COMMIT, COMMIT) == COMMIT
+
+
+def test_main_prepares_tag_and_sdk_pins_before_validating_assets(
+    publisher_root, monkeypatch
+):
+    metadata = ReleaseMetadata("0.1.0b2", "0.1.0b3")
+    assets = {
+        name: Asset(publisher_root / "dist" / name, 10, "sha256:" + "0" * 64)
+        for name in metadata.publication_assets
+    }
+    fake = FakeGh(assets)
+    stages = []
+    prepare_release = release_publish.prepare_release
+    read_metadata = release_publish.read_metadata
+
+    def run(arguments):
+        assert arguments == [
+            "git",
+            "-C",
+            str(publisher_root),
+            "rev-parse",
+            "HEAD",
+        ]
+        stages.append("commit")
+        return subprocess.CompletedProcess(arguments, 0, COMMIT + "\n", "")
+
+    def prepare(root, tag):
+        stages.append("prepare")
+        prepare_release(root, tag)
+
+    def read(root, tag):
+        stages.append("metadata")
+        return read_metadata(root, tag)
+
+    def validate(dist, prepared):
+        stages.append("assets")
+        assert dist == publisher_root / "dist" and prepared == metadata
+        assert read_metadata(publisher_root, TAG) == metadata
+        assert 'version = "0.1.0b2"' in (publisher_root / "uv.lock").read_text()
+        assert 'version = "0.1.0b3"' in (publisher_root / "uv.lock").read_text()
+        return assets
+
+    def github(repository):
+        stages.append("github")
+        return GitHub(repository, fake)
+
+    monkeypatch.setattr(release_publish, "run_command", run)
+    monkeypatch.setattr(release_publish, "prepare_release", prepare)
+    monkeypatch.setattr(release_publish, "read_metadata", read)
+    monkeypatch.setattr(release_publish, "expected_assets", validate)
+    monkeypatch.setattr(release_publish, "GitHub", github)
+    invoke_main(monkeypatch, publisher_root)
+    assert stages == ["commit", "prepare", "metadata", "assets", "github"]
+    assert not fake.draft
+    assert (publisher_root / "release-notes.md").read_text() == (
+        release_publish.release_notes(metadata)
+    )
+
+
+@pytest.mark.parametrize(
+    "event,tested", [(OTHER_COMMIT, COMMIT), (COMMIT, OTHER_COMMIT), ("bad", COMMIT)]
+)
+def test_main_commit_mismatch_cannot_prepare_or_access_github(
+    publisher_root, monkeypatch, event, tested
+):
+    calls = []
+    before = {
+        path: path.read_bytes() for path in publisher_root.rglob("*") if path.is_file()
+    }
+
+    def run(arguments):
+        calls.append(arguments)
+        assert arguments[:2] == ["git", "-C"]
+        return subprocess.CompletedProcess(arguments, 0, COMMIT + "\n", "")
+
+    def unexpected(*args):
+        pytest.fail("Commit mismatch must stop before preparation or GitHub access")
+
+    monkeypatch.setattr(release_publish, "run_command", run)
+    monkeypatch.setattr(release_publish, "prepare_release", unexpected)
+    monkeypatch.setattr(release_publish, "GitHub", unexpected)
+    with pytest.raises(SystemExit) as failure:
+        invoke_main(monkeypatch, publisher_root, event=event, tested=tested)
+    assert failure.value.code == 1
+    assert len(calls) == 1
+    assert all(path.read_bytes() == contents for path, contents in before.items())
+    assert not (publisher_root / "release-notes.md").exists()
+
+
+@pytest.mark.parametrize("tag", ["v0.1.0b0", "v01.1.0", "v0.1.0b2\nprivate-text"])
+def test_main_invalid_tag_cannot_modify_metadata_or_access_github(
+    publisher_root, monkeypatch, tag
+):
+    calls = []
+    before = {
+        path: path.read_bytes() for path in publisher_root.rglob("*") if path.is_file()
+    }
+
+    def run(arguments):
+        calls.append(arguments)
+        assert arguments[:2] == ["git", "-C"]
+        return subprocess.CompletedProcess(arguments, 0, COMMIT + "\n", "")
+
+    def unexpected(*args):
+        pytest.fail("Invalid tag must stop before asset validation or GitHub access")
+
+    monkeypatch.setattr(release_publish, "run_command", run)
+    monkeypatch.setattr(release_publish, "expected_assets", unexpected)
+    monkeypatch.setattr(release_publish, "GitHub", unexpected)
+    with pytest.raises(SystemExit) as failure:
+        invoke_main(monkeypatch, publisher_root, tag=tag)
+    assert failure.value.code == 1
+    assert len(calls) == 1
+    assert all(path.read_bytes() == contents for path, contents in before.items())
+    assert not (publisher_root / "release-notes.md").exists()
+
+
+def test_main_asset_validation_failure_cannot_access_github(
+    publisher_root, monkeypatch
+):
+    def run(arguments):
+        assert arguments[:2] == ["git", "-C"]
+        return subprocess.CompletedProcess(arguments, 0, COMMIT + "\n", "")
+
+    def invalid_assets(dist, metadata):
+        assert metadata == ReleaseMetadata("0.1.0b2", "0.1.0b3")
+        raise ValueError("Synthetic invalid release assets.")
+
+    def unexpected(*args):
+        pytest.fail("Invalid assets must stop before GitHub access")
+
+    monkeypatch.setattr(release_publish, "run_command", run)
+    monkeypatch.setattr(release_publish, "expected_assets", invalid_assets)
+    monkeypatch.setattr(release_publish, "GitHub", unexpected)
+    with pytest.raises(SystemExit) as failure:
+        invoke_main(monkeypatch, publisher_root)
+    assert failure.value.code == 1
+    assert not (publisher_root / "release-notes.md").exists()
 
 
 def test_expected_publication_files_have_digests_and_required_checksums(

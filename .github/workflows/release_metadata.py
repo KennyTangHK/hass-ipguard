@@ -28,6 +28,7 @@ from scripts.packaging_policy import (  # noqa: E402
     validate_wheel_payload,
     zip_contents,
 )
+from scripts.prepare_release import prepare_release  # noqa: E402
 
 VERSION = re.compile(
     r"[0-9]+\.[0-9]+\.[0-9]+(?:(?:a|b|rc)[0-9]+)?"
@@ -100,10 +101,15 @@ def read_metadata(root: Path, tag: str = "") -> ReleaseMetadata:
         raise ValueError("Source manifest must pin the current SDK version.")
     if hacs.get("filename") != "ipguard.zip" or hacs.get("zip_release") is not True:
         raise ValueError("HACS must use the generated ipguard.zip release asset.")
-    if tag and tag != f"v{version}":
-        raise ValueError(
-            "Release tag must be vX.Y.Z or vX.Y.ZbN and match the integration version."
-        )
+    if tag:
+        if not tag.startswith("v") or RELEASE_VERSION.fullmatch(tag[1:]) is None:
+            raise ValueError("Release tag must be vX.Y.Z or vX.Y.ZbN.")
+        if tag != f"v{version}":
+            raise ValueError(
+                f"Release tag {tag} does not match integration version {version}; "
+                f"expected v{version}. Run release_metadata.py --prepare --tag {tag} "
+                "to generate metadata from this tag before validating."
+            )
     return ReleaseMetadata(version, sdk_version)
 
 
@@ -362,6 +368,11 @@ def release_notes(metadata: ReleaseMetadata) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tag", default="")
+    parser.add_argument(
+        "--prepare",
+        action="store_true",
+        help="Generate integration versions and SDK pins before validating.",
+    )
     parser.add_argument("--ref-type")
     parser.add_argument("--github-output", type=Path)
     parser.add_argument("--dist", type=Path)
@@ -374,6 +385,8 @@ def main() -> None:
     try:
         if args.ref_type is not None and (args.ref_type != "tag" or not args.tag):
             raise ValueError("Release workflows must run against a version tag.")
+        if args.prepare:
+            prepare_release(ROOT, args.tag)
         metadata = read_metadata(ROOT, args.tag)
         validate_build_constraints(ROOT)
         load_policy(ROOT)

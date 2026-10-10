@@ -9,6 +9,7 @@ Use the interpreter selected by [`.python-version`](.python-version). Runtime re
 Run from the repository root:
 
 ```sh
+uv run --no-project --python "$(cat .python-version)" python scripts/prepare_release.py
 uv sync --locked --all-packages
 uv run --no-sync python --version
 uv run --no-sync ruff check .
@@ -34,13 +35,14 @@ The independent SDK is imported only through the integration's `api.py` adapter.
 ## Build an installable release
 
 ```sh
+uv run --no-project --python "$(cat .python-version)" python scripts/prepare_release.py
 uv build --all-packages --build-constraints build-constraints.txt --require-hashes
 uv run --no-sync python scripts/build_release.py
 ```
 
 The builder reads the integration and SDK versions from their package metadata and produces two archives with checksums: `dist/ipguard.zip` contains flat integration files for HACS, and `dist/ipguard-<version>.zip` contains `custom_components/ipguard` for manual extraction into a configuration directory. It checks the independent SDK wheel's name/version, includes its Apache-2.0 license, changes only the generated adapter to relative SDK imports, and sets the generated manifest's native requirement to the reviewed PyZMQ pin in [`scripts/build_release.py`](scripts/build_release.py). `release.json` records the SDK version and wheel digest. Identical inputs produce identical ZIP contents; generated files are not maintained by hand.
 
-The source manifest pins the SDK version declared by the independent package for a future PyPI publication. Install the bundled GitHub release through HACS, or use the manual archive. `hide_default_branch` prevents HACS from offering the source checkout without its built SDK. Native PyZMQ is installed by Home Assistant; no macOS binary is included in either archive. Before changing SDK dependencies, update the builder's dependency validation and release checks.
+The source metadata is a valid development snapshot. Release workflows derive the integration version from the pushed tag and synchronize both SDK pins from the independent SDK package. The preparer updates only those metadata fields and local workspace versions in the lockfile, preserving external dependencies and hashes. The publisher repeats the same preparation from the checked commit and tag before comparing artifact bytes. For a local tagged build, run `uv run --no-project --python "$(cat .python-version)" python scripts/prepare_release.py --tag "$release_tag"` before building; without a tag, it synchronizes SDK pins and retains the development version. The source manifest's SDK pin supports a future PyPI publication. Install the bundled GitHub release through HACS, or use the manual archive. `hide_default_branch` prevents HACS from offering the source checkout without its built SDK. Native PyZMQ is installed by Home Assistant; no macOS binary is included in either archive. Before changing SDK dependencies, update the builder's dependency validation and release checks.
 
 The checks workflow runs lint, formatting, strict typing, tests, builds, HACS validation and the isolated container release check. It is also called by the release workflow before publication. Only the publishing job receives `contents: write`; normal changes and pull requests receive read-only permissions. Core submission still requires publishing the independent SDK and meeting upstream rules; bundled custom packaging does not imply Core approval.
 
@@ -53,21 +55,21 @@ Release versions follow PEP 440 and Home Assistant/HACS's AwesomeVersion. Tags h
 | Beta | `<major>.<minor>.<patch>b<serial>` | `v<major>.<minor>.<patch>b<serial>` | Prerelease; excluded from Latest |
 | Stable | `<major>.<minor>.<patch>` | `v<major>.<minor>.<patch>` | Normal release; marked Latest |
 
-1. Set the integration version in [`pyproject.toml`](pyproject.toml) and [`custom_components/ipguard/manifest.json`](custom_components/ipguard/manifest.json) to the desired beta or stable form.
-2. If the SDK changed, update its own [`pyproject.toml`](ipguard-api/pyproject.toml), the root SDK dependency and the source manifest's SDK requirement together. The SDK may otherwise retain its independent version.
-3. Run `uv lock` and the local checks/build commands above. Review, commit and push the changes to the default branch.
-4. Create and push the matching tag. The **Publish release** workflow runs all checks, builds and publishes the assets automatically:
+1. Review implementation changes and run the relevant checks. Integration releases require no manual edits to the package version, manifest version or SDK pins.
+2. When intentionally releasing a changed SDK, update only its version in [`ipguard-api/pyproject.toml`](ipguard-api/pyproject.toml), then run `uv run --no-project --python "$(cat .python-version)" python scripts/prepare_release.py` to synchronize dependent pins and local lock versions. An unchanged SDK retains its independent version. Changes to actual dependencies still require a reviewed `uv lock` update.
+3. Commit and push the changes to the default branch.
+4. Choose the new beta or stable tag and push it. The **Publish release** workflow prepares metadata from that tag, runs all checks, builds and publishes the assets automatically:
 
 ```sh
-release_version="$(uv run --no-sync python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+release_tag="v<major>.<minor>.<patch>b<serial>"
 git push origin master
-git tag "v$release_version"
-git push origin "v$release_version"
+git tag "$release_tag"
+git push origin "$release_tag"
 ```
 
-For a stable release, remove the beta suffix from the integration version before creating its new tag. When promoting the project out of beta, also remove beta-only labels from the README and HACS display name, and review the SDK's status separately. Create a new stable tag rather than changing the prerelease flag on a published beta.
+For a stable release, choose `v<major>.<minor>.<patch>` without the beta suffix. When promoting the project out of beta, also remove beta-only labels from the README and HACS display name, and review the SDK's status separately. Create a new stable tag rather than changing the prerelease flag on a published beta.
 
-The workflow checks tag/package/manifest versions, independent SDK requirements, and the exact tested commit. It discovers existing drafts through authenticated release-list pagination, with a read-only GraphQL lookup when the list has no match, and pins creation, reads, uploads and publication to one release ID. Newly created drafts use the ID returned by GitHub rather than requiring immediate list visibility. Requests retry transient read failures within bounded waits, respect server retry delays, and briefly wait for uploaded asset metadata. An uncertain creation response is reconciled without sending a second creation request. [GitHub release API](https://docs.github.com/en/rest/releases/releases#create-a-release), [GitHub retry guidance](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api)
+The workflow generates integration versions and SDK pins before checking their consistency with the tag, independent SDK requirements, and the exact tested commit. It discovers existing drafts through authenticated release-list pagination, with a read-only GraphQL lookup when the list has no match, and pins creation, reads, uploads and publication to one release ID. Newly created drafts use the ID returned by GitHub rather than requiring immediate list visibility. Requests retry transient read failures within bounded waits, respect server retry delays, and briefly wait for uploaded asset metadata. An uncertain creation response is reconciled without sending a second creation request. [GitHub release API](https://docs.github.com/en/rest/releases/releases#create-a-release), [GitHub retry guidance](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api)
 
 Existing assets with matching uploaded state, size and SHA-256 digest are reused. Only expected draft assets needing replacement are deleted; unexpected or duplicate assets stop publication. All nine final assets and the remote tag are checked before publishing with the metadata-derived beta/stable flags. Writes recheck the pinned release's draft state. Failures before the final publication attempt leave the draft unpublished. If that response is lost, the publisher reads the release and rechecks all asset bytes and the tag to confirm the result, reporting uncertainty if confirmation fails. Published releases are never overwritten. No manual ZIP upload, personal access token, or PyPI publishing step is required.
 
@@ -107,7 +109,7 @@ The local tag remains until explicitly removed with `git tag -d "$release_tag"`.
 
 Upgrade testing uses the [checked-in baseline fixture](.github/fixtures/README.md), so deleting old releases and tags does not remove the test input. Keep that fixture and its matching SHA-256 in [`scripts/smoke_release.py`](scripts/smoke_release.py) together when changing the baseline.
 
-For the next version, update the integration package and manifest. Change the SDK version and dependency when releasing SDK changes. Update documentation when behavior or installation steps change; versions and requirements remain in their authoritative metadata files. Run `uv lock`, checks and constrained builds, commit, then push a matching beta or stable tag. Mismatched tags and unsupported version formats fail before publication. Do not move an existing release tag; fix failed workflows and rerun the same tag's workflow, or publish a new version as appropriate.
+For the next integration version, commit the implementation changes and choose a new beta or stable tag; the workflow generates release metadata automatically. Change the SDK's own version only when releasing SDK changes, and use the preparer to synchronize its pins. Update documentation when behavior or installation steps change. Invalid tags, inconsistent prepared metadata and unverified artifacts fail before publication. Do not move an existing release tag; fix failed workflows and rerun the same tag's workflow, or publish a new version as appropriate.
 
 The integration is listed in the HACS catalogue as `KennyTangHK/hass-ipguard`. Keep the repository public with its description/topics and release assets maintained. Catalogue inclusion is separate from Home Assistant Core approval. The HACS validator reads the exact pushed GitHub revision, so it cannot fully validate unpushed local changes. [HACS publisher guide](https://www.hacs.dev/docs/publish/)
 
