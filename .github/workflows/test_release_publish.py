@@ -6,6 +6,7 @@ import hashlib
 import json
 import subprocess
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import release_publish
@@ -23,6 +24,12 @@ COMMIT = "a" * 40
 OTHER_COMMIT = "b" * 40
 ANNOTATED = "c" * 40
 TAG = "v0.1.0b2"
+REPO = "owner/repository"
+
+
+@pytest.fixture(autouse=True)
+def no_waiting(monkeypatch):
+    monkeypatch.setattr(release_publish, "sleep", lambda _: None)
 
 
 @pytest.fixture
@@ -52,16 +59,50 @@ def remote(assets: dict[str, Asset]) -> list[dict[str, object]]:
     ]
 
 
-def response(code: int, value: object) -> subprocess.CompletedProcess[str]:
+def response(
+    code: int, value: object = None, *, headers: str = ""
+) -> subprocess.CompletedProcess[str]:
+    body = "" if code == 204 else json.dumps(value)
     return subprocess.CompletedProcess(
         [],
-        0 if code == 200 else 1,
-        f"HTTP/2.0 {code} Result\nContent-Type: application/json\n\n{json.dumps(value)}",
+        0 if 200 <= code < 300 else 1,
+        f"HTTP/2.0 {code} Result\nContent-Type: application/json\n{headers}\n{body}",
         "",
     )
 
 
+def graphql_payload(release: object) -> dict[str, object]:
+    return {"data": {"repository": {"release": release}}}
+
+
+def method(arguments: list[str]) -> str:
+    assert arguments[:2] == ["gh", "api"], "Publication must use the authenticated API"
+    return arguments[arguments.index("--method") + 1]
+
+
+def endpoint(arguments: list[str]) -> str:
+    return arguments[-1]
+
+
+def fields(arguments: list[str]) -> dict[str, str]:
+    return {
+        arguments[index + 1].split("=", 1)[0]: arguments[index + 1].split("=", 1)[1]
+        for index, value in enumerate(arguments[:-1])
+        if value in {"-f", "-F", "--field", "--raw-field"}
+    }
+
+
+def writes(fake: FakeGh) -> list[list[str]]:
+    return [
+        call
+        for call in fake.calls
+        if method(call) != "GET" and endpoint(call) != "graphql"
+    ]
+
+
 class FakeGh:
+    """An in-memory release with individually addressed release and asset APIs."""
+
     def __init__(
         self, assets: dict[str, Asset], *, existing: bool = True, tag: str = TAG
     ) -> None:
@@ -70,25 +111,59 @@ class FakeGh:
         self.existing, self.draft, self.uploaded = existing, True, False
         self.before: list[dict[str, object]] = remote(assets)[:2] if existing else []
         self.after: list[dict[str, object]] = remote(assets)
-        self.commits = [COMMIT, COMMIT, COMMIT]
+        self.commits = [COMMIT, COMMIT, COMMIT, COMMIT]
         self.annotated = False
         self.fail_upload = False
         self.api_status = 200
 
+    def release(self) -> dict[str, object]:
+        return {
+            "id": 7,
+            "tag_name": self.tag,
+            "draft": self.draft,
+            "prerelease": "b" in self.tag,
+        }
+
     def __call__(self, arguments: list[str]) -> subprocess.CompletedProcess[str]:
         self.calls.append(arguments)
-        if arguments[:2] == ["gh", "api"]:
-            endpoint = arguments[-1].split("repos/owner/repository/", 1)[1]
-            if self.api_status != 200:
-                return response(self.api_status, {"message": "Synthetic failure"})
-            if endpoint == f"git/ref/tags/{self.tag}":
-                target = (
+        verb, target = method(arguments), endpoint(arguments)
+        if self.api_status != 200:
+            return response(self.api_status, {"message": "Synthetic failure"})
+        if target == "graphql":
+            assert verb == "POST"
+            item = (
+                {"databaseId": 7, "tagName": self.tag, "isDraft": self.draft}
+                if self.existing
+                else None
+            )
+            return response(200, graphql_payload(item))
+        if target.startswith("https://uploads.github.com/"):
+            assert verb == "POST"
+            assert urlsplit(target).path == f"/repos/{REPO}/releases/7/assets"
+            name = parse_qs(urlsplit(target).query)["name"][0]
+            assert "--input" in arguments
+            assert Path(arguments[arguments.index("--input") + 1]).name == name
+            if self.fail_upload:
+                return response(403, {"message": "credential body secret token"})
+            item = next(item for item in self.after if item["name"] == name)
+            # A successful upload response includes its server-side digest.
+            uploaded = dict(item, id=100 + len(self.before))
+            self.before.append(uploaded)
+            self.uploaded = True
+            return response(201, uploaded)
+        assert target.startswith(f"repos/{REPO}/")
+        target = target.removeprefix(f"repos/{REPO}/")
+        if verb == "GET":
+            if target == f"git/ref/tags/{self.tag}":
+                target_object = (
                     {"type": "tag", "sha": ANNOTATED}
                     if self.annotated
                     else {"type": "commit", "sha": self.commits.pop(0)}
                 )
-                return response(200, {"ref": f"refs/tags/{self.tag}", "object": target})
-            if endpoint == f"git/tags/{ANNOTATED}":
+                return response(
+                    200, {"ref": f"refs/tags/{self.tag}", "object": target_object}
+                )
+            if target == f"git/tags/{ANNOTATED}":
                 return response(
                     200,
                     {
@@ -96,36 +171,44 @@ class FakeGh:
                         "object": {"type": "commit", "sha": self.commits.pop(0)},
                     },
                 )
-            if endpoint == f"releases/tags/{self.tag}":
-                # GitHub's by-tag endpoint does not return unpublished drafts.
+            if target == "releases?per_page=100&page=1":
+                return response(200, [self.release()] if self.existing else [])
+            if target == "releases/7":
                 return (
-                    response(200, {"id": 7, "tag_name": self.tag, "draft": self.draft})
-                    if self.existing and not self.draft
+                    response(200, self.release())
+                    if self.existing
                     else response(404, {})
                 )
-            if endpoint == "releases?per_page=100&page=1":
+            if target.startswith("releases/7/assets?"):
+                complete = {item["name"] for item in self.after}.issubset(
+                    {item["name"] for item in self.before}
+                )
                 return response(
-                    200,
-                    [{"id": 7, "tag_name": self.tag, "draft": self.draft}]
-                    if self.existing
-                    else [],
+                    200, self.after if self.uploaded and complete else self.before
                 )
-            if endpoint.startswith("releases/7/assets?"):
-                return response(200, self.after if self.uploaded else self.before)
-            raise AssertionError("Unexpected API endpoint")
-        if arguments[:3] == ["gh", "release", "create"]:
+        elif verb == "POST" and target == "releases":
             self.existing = True
-        elif arguments[:3] == ["gh", "release", "upload"]:
-            if self.fail_upload:
-                return subprocess.CompletedProcess(
-                    [], 1, "credential body", "secret token"
-                )
-            self.uploaded = True
-        elif arguments[:3] == ["gh", "release", "edit"]:
+            return response(201, self.release())
+        elif verb == "DELETE" and target.startswith("releases/assets/"):
+            identity = int(target.rsplit("/", 1)[1])
+            self.before[:] = [item for item in self.before if item["id"] != identity]
+            return response(204)
+        elif verb == "PATCH" and target == "releases/7":
+            assert fields(arguments)["draft"] == "false"
             self.draft = False
-        else:
-            raise AssertionError("Unexpected GitHub command")
-        return subprocess.CompletedProcess([], 0, "", "")
+            return response(200, self.release())
+        raise AssertionError(f"Unexpected API operation: {verb} {target}")
+
+
+def publish_fake(fake, assets, tmp_path, *, tag=TAG, metadata=None, runner=None):
+    publish(
+        GitHub(REPO, runner or fake),
+        metadata or ReleaseMetadata("0.1.0b2", "0.1.0b2"),
+        tag,
+        assets,
+        tmp_path / "notes.md",
+        COMMIT,
+    )
 
 
 @pytest.mark.parametrize("existing", [True, False])
@@ -135,22 +218,24 @@ def test_publish_new_or_partial_draft_after_complete_verification(
 ):
     fake = FakeGh(assets, existing=existing)
     fake.annotated = annotated
-    publish(
-        GitHub("owner/repository", fake),
-        ReleaseMetadata("0.1.0b2", "0.1.0b2"),
-        TAG,
-        assets,
-        tmp_path / "notes.md",
-        COMMIT,
-    )
+    publish_fake(fake, assets, tmp_path)
     assert not fake.draft
-    writes = [call for call in fake.calls if call[:2] == ["gh", "release"]]
-    assert [call[2] for call in writes] == (
-        ["upload", "edit"] if existing else ["create", "upload", "edit"]
+    mutations = writes(fake)
+    assert sum(
+        method(call) == "POST" and endpoint(call).endswith("/releases")
+        for call in mutations
+    ) == (0 if existing else 1)
+    assert all(method(call) == "POST" for call in mutations[:-1])
+    assert method(mutations[-1]) == "PATCH"
+    assert fields(mutations[-1])["prerelease"] == "true"
+    assert fields(mutations[-1])["make_latest"] == "false"
+    assert endpoint(mutations[-1]) == f"repos/{REPO}/releases/7"
+    assert sum("git/ref/tags/" in endpoint(call) for call in fake.calls) == 3
+    assert not any("releases/tags/" in endpoint(call) for call in fake.calls)
+    assert all(call[:2] == ["gh", "api"] for call in fake.calls)
+    assert sum(endpoint(call) == "graphql" for call in fake.calls) == (
+        0 if existing else 1
     )
-    assert "--prerelease=true" in writes[-1] and "--latest=false" in writes[-1]
-    assert sum("git/ref/tags/" in call[-1] for call in fake.calls) == 3
-    assert not any("releases/tags/" in call[-1] for call in fake.calls)
 
 
 def test_stable_publication_sets_stable_latest_flags(assets, tmp_path):
@@ -160,15 +245,9 @@ def test_stable_publication_sets_stable_latest_flags(assets, tmp_path):
         for name in metadata.publication_assets
     }
     fake = FakeGh(stable_assets, tag="v0.1.0")
-    publish(
-        GitHub("owner/repository", fake),
-        metadata,
-        "v0.1.0",
-        stable_assets,
-        tmp_path / "notes.md",
-        COMMIT,
-    )
-    assert "--prerelease=false" in fake.calls[-1] and "--latest=true" in fake.calls[-1]
+    publish_fake(fake, stable_assets, tmp_path, tag="v0.1.0", metadata=metadata)
+    assert fields(writes(fake)[-1])["prerelease"] == "false"
+    assert fields(writes(fake)[-1])["make_latest"] == "true"
 
 
 @pytest.mark.parametrize(
@@ -185,15 +264,8 @@ def test_invalid_existing_draft_never_uploads_or_publishes(assets, tmp_path, mut
     else:
         fake.draft = False
     with pytest.raises(ValueError):
-        publish(
-            GitHub("owner/repository", fake),
-            ReleaseMetadata("0.1.0b2", "0.1.0b2"),
-            TAG,
-            assets,
-            tmp_path / "notes.md",
-            COMMIT,
-        )
-    assert not any(call[:2] == ["gh", "release"] for call in fake.calls)
+        publish_fake(fake, assets, tmp_path)
+    assert not writes(fake)
 
 
 @pytest.mark.parametrize(
@@ -212,14 +284,15 @@ def test_invalid_existing_draft_never_uploads_or_publishes(assets, tmp_path, mut
 )
 def test_uploaded_asset_mismatch_keeps_draft(assets, tmp_path, mutation):
     fake = FakeGh(assets)
+    altered = [dict(item) for item in fake.after]
     if mutation == "extra":
-        fake.after.append({"id": 99, "name": "session.json"})
+        altered.append({"id": 99, "name": "session.json"})
     elif mutation == "missing":
-        fake.after.pop()
+        altered.pop()
     elif mutation == "duplicate":
-        fake.after.append(dict(fake.after[0], id=99))
+        altered.append(dict(altered[0], id=99))
     elif mutation == "missing_digest":
-        fake.after[0].pop("digest")
+        altered[0].pop("digest")
     else:
         field, value = {
             "state": ("state", "starter"),
@@ -228,19 +301,24 @@ def test_uploaded_asset_mismatch_keeps_draft(assets, tmp_path, mutation):
             "digest": ("digest", "sha256:" + "0" * 64),
             "null_digest": ("digest", None),
         }[mutation]
-        fake.after[0][field] = value
+        altered[0][field] = value
+
+    def runner(arguments):
+        result = fake(arguments)
+        if (
+            method(arguments) == "GET"
+            and fake.uploaded
+            and len(fake.before) == len(assets)
+            and "/assets?" in endpoint(arguments)
+        ):
+            return response(200, altered)
+        return result
+
     with pytest.raises(ValueError):
-        publish(
-            GitHub("owner/repository", fake),
-            ReleaseMetadata("0.1.0b2", "0.1.0b2"),
-            TAG,
-            assets,
-            tmp_path / "notes.md",
-            COMMIT,
-        )
+        publish_fake(fake, assets, tmp_path, runner=runner)
     assert fake.draft
-    assert not any(call[:3] == ["gh", "release", "edit"] for call in fake.calls)
-    assert not any("delete" in call for call in fake.calls)
+    assert not any(method(call) == "PATCH" for call in fake.calls)
+    assert not any(method(call) == "DELETE" for call in fake.calls)
 
 
 @pytest.mark.parametrize("changed_at", [0, 1, 2])
@@ -248,14 +326,7 @@ def test_tag_change_stops_before_next_write(assets, tmp_path, changed_at):
     fake = FakeGh(assets)
     fake.commits[changed_at] = OTHER_COMMIT
     with pytest.raises(ValueError, match="tag"):
-        publish(
-            GitHub("owner/repository", fake),
-            ReleaseMetadata("0.1.0b2", "0.1.0b2"),
-            TAG,
-            assets,
-            tmp_path / "notes.md",
-            COMMIT,
-        )
+        publish_fake(fake, assets, tmp_path)
     assert fake.draft
     assert fake.uploaded is (changed_at == 2)
 
@@ -263,18 +334,13 @@ def test_tag_change_stops_before_next_write(assets, tmp_path, changed_at):
 def test_upload_failure_does_not_log_response_or_publish(assets, tmp_path, capsys):
     fake = FakeGh(assets)
     fake.fail_upload = True
-    with pytest.raises(ValueError, match="draft is retained") as error:
-        publish(
-            GitHub("owner/repository", fake),
-            ReleaseMetadata("0.1.0b2", "0.1.0b2"),
-            TAG,
-            assets,
-            tmp_path / "notes.md",
-            COMMIT,
-        )
+    with pytest.raises(ValueError) as error:
+        publish_fake(fake, assets, tmp_path)
     assert "secret" not in str(error.value) and "credential" not in str(error.value)
-    assert capsys.readouterr().out == ""
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == ""
     assert fake.draft
+    assert not any(method(call) == "PATCH" for call in fake.calls)
 
 
 @pytest.mark.parametrize("code", [401, 403, 500])
@@ -282,71 +348,72 @@ def test_api_failure_is_not_treated_as_a_missing_draft(assets, tmp_path, code):
     fake = FakeGh(assets, existing=False)
     fake.api_status = code
     with pytest.raises(ValueError, match="API request failed"):
-        publish(
-            GitHub("owner/repository", fake),
-            ReleaseMetadata("0.1.0b2", "0.1.0b2"),
-            TAG,
-            assets,
-            tmp_path / "notes.md",
-            COMMIT,
-        )
-    assert not any(call[:2] == ["gh", "release"] for call in fake.calls)
+        publish_fake(fake, assets, tmp_path)
+    assert not writes(fake)
 
 
-@pytest.mark.parametrize("mutation", ["published", "missing", "different_id"])
+@pytest.mark.parametrize(
+    "mutation", ["published", "missing", "different_id", "different_tag"]
+)
 def test_draft_replacement_after_upload_stops_publication(assets, tmp_path, mutation):
     fake = FakeGh(assets)
 
     def runner(arguments):
         result = fake(arguments)
-        if fake.uploaded and arguments[-1].endswith("releases?per_page=100&page=1"):
+        if (
+            method(arguments) == "GET"
+            and fake.uploaded
+            and endpoint(arguments).endswith("releases/7")
+        ):
             if mutation == "missing":
-                return response(200, [])
+                return response(404, {})
             return response(
                 200,
-                [
-                    {
-                        "id": 8 if mutation == "different_id" else 7,
-                        "tag_name": TAG,
-                        "draft": mutation != "published",
-                    }
-                ],
+                {
+                    "id": 8 if mutation == "different_id" else 7,
+                    "tag_name": "v0.1.0b9" if mutation == "different_tag" else TAG,
+                    "draft": mutation != "published",
+                },
             )
         return result
 
     with pytest.raises(ValueError):
-        publish(
-            GitHub("owner/repository", runner),
-            ReleaseMetadata("0.1.0b2", "0.1.0b2"),
-            TAG,
-            assets,
-            tmp_path / "notes.md",
-            COMMIT,
-        )
-    assert not any(call[:3] == ["gh", "release", "edit"] for call in fake.calls)
+        publish_fake(fake, assets, tmp_path, runner=runner)
+    assert not any(method(call) == "PATCH" for call in fake.calls)
 
 
-def test_created_draft_missing_from_release_list_stops_before_upload(assets, tmp_path):
+def test_created_draft_can_stay_absent_from_release_list(assets, tmp_path):
     fake = FakeGh(assets, existing=False)
 
     def runner(arguments):
         result = fake(arguments)
-        if arguments[-1].endswith("releases?per_page=100&page=1"):
+        if endpoint(arguments).endswith("releases?per_page=100&page=1"):
             return response(200, [])
         return result
 
-    with pytest.raises(ValueError, match="Created release draft could not be read"):
-        publish(
-            GitHub("owner/repository", runner),
-            ReleaseMetadata("0.1.0b2", "0.1.0b2"),
-            TAG,
-            assets,
-            tmp_path / "notes.md",
-            COMMIT,
+    publish_fake(fake, assets, tmp_path, runner=runner)
+    assert not fake.draft
+    assert (
+        sum(
+            method(call) == "POST" and endpoint(call).endswith("/releases")
+            for call in fake.calls
         )
-    writes = [call for call in fake.calls if call[:2] == ["gh", "release"]]
-    assert [call[2] for call in writes] == ["create"]
-    assert fake.draft
+        == 1
+    )
+    create_index = next(
+        index
+        for index, call in enumerate(fake.calls)
+        if method(call) == "POST" and endpoint(call).endswith("/releases")
+    )
+    first_upload_index = next(
+        index
+        for index, call in enumerate(fake.calls)
+        if endpoint(call).startswith("https://uploads.github.com/")
+    )
+    assert not any(
+        "releases?" in endpoint(call)
+        for call in fake.calls[create_index + 1 : first_upload_index]
+    )
 
 
 def test_wrong_publication_tag_or_asset_set_has_no_remote_calls(assets, tmp_path):
@@ -587,7 +654,18 @@ def test_malformed_http_and_json_fail_closed():
             GitHub("owner/repository", runner).get("releases/tags/test")
 
 
-def test_subprocess_boundary_uses_argv_and_captures_sensitive_diagnostics(monkeypatch):
+@pytest.mark.parametrize(
+    "arguments,timeout",
+    [
+        (["gh", "api", "--method", "GET", "--include", "test"], 30),
+        (["gh", "api", "--method", "POST", "--include", "graphql"], 30),
+        (["gh", "api", "--method", "POST", "--include", "test"], 300),
+        (["git", "rev-parse", "HEAD"], 300),
+    ],
+)
+def test_subprocess_boundary_uses_argv_and_captures_sensitive_diagnostics(
+    monkeypatch, arguments, timeout
+):
     calls = []
 
     def run(arguments, **kwargs):
@@ -597,12 +675,11 @@ def test_subprocess_boundary_uses_argv_and_captures_sensitive_diagnostics(monkey
         )
 
     monkeypatch.setattr(release_publish.subprocess, "run", run)
-    arguments = ["gh", "release", "upload", TAG, "/path with spaces/ipguard.zip"]
     release_publish.run_command(arguments)
     assert calls == [
         (
             arguments,
-            {"capture_output": True, "text": True, "check": False, "timeout": 300},
+            {"capture_output": True, "text": True, "check": False, "timeout": timeout},
         )
     ]
 
@@ -617,3 +694,956 @@ def test_subprocess_timeout_does_not_expose_output(monkeypatch):
     with pytest.raises(ValueError, match="could not complete") as error:
         release_publish.run_command(["gh", "api", "test"])
     assert "secret" not in str(error.value) and "credentials" not in str(error.value)
+
+
+def test_creation_and_publication_send_metadata_and_notes_by_id(assets, tmp_path):
+    fake = FakeGh(assets, existing=False)
+    publish_fake(fake, assets, tmp_path)
+    create = next(call for call in writes(fake) if endpoint(call).endswith("/releases"))
+    create_fields = fields(create)
+    assert create_fields["tag_name"] == TAG
+    assert create_fields["target_commitish"] == COMMIT
+    assert create_fields["name"] == "IPGUARD 0.1.0b2"
+    assert create_fields["draft"] == "true"
+    assert create_fields["prerelease"] == "true"
+    assert create_fields["body"] == f"@{tmp_path / 'notes.md'}"
+    final = writes(fake)[-1]
+    assert endpoint(final) == f"repos/{REPO}/releases/7"
+    assert fields(final)["name"] == create_fields["name"]
+    assert fields(final)["body"] == create_fields["body"]
+    assert fields(final)["draft"] == "false"
+    for call in fake.calls:
+        if endpoint(call).startswith("https://uploads.github.com/"):
+            assert "Content-Type: application/octet-stream" in call
+
+
+def test_matching_complete_draft_skips_every_asset_write(assets, tmp_path):
+    fake = FakeGh(assets)
+    fake.before = remote(assets)
+    publish_fake(fake, assets, tmp_path)
+    assert [method(call) for call in writes(fake)] == ["PATCH"]
+    assert not fake.uploaded
+    assert not fake.draft
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("state", "starter"),
+        ("size", 0),
+        ("digest", None),
+        ("digest", "sha256:" + "0" * 64),
+    ],
+)
+def test_only_mismatched_expected_asset_is_replaced_by_asset_id(
+    assets, tmp_path, field, value
+):
+    fake = FakeGh(assets)
+    fake.before = remote(assets)
+    fake.before[0][field] = value
+    publish_fake(fake, assets, tmp_path)
+    delete_calls = [call for call in writes(fake) if method(call) == "DELETE"]
+    uploads = [call for call in writes(fake) if method(call) == "POST"]
+    assert [endpoint(call) for call in delete_calls] == [
+        f"repos/{REPO}/releases/assets/1"
+    ]
+    assert len(uploads) == 1
+    assert parse_qs(urlsplit(endpoint(uploads[0])).query)["name"] == [
+        next(iter(assets))
+    ]
+    assert not fake.draft
+
+
+def test_each_existing_release_mutation_rechecks_same_draft_by_id(assets, tmp_path):
+    fake = FakeGh(assets)
+    fake.before[0]["digest"] = None
+    publish_fake(fake, assets, tmp_path)
+    since_mutation = []
+    for call in fake.calls:
+        if method(call) == "GET":
+            since_mutation.append(call)
+        else:
+            assert any(
+                endpoint(read) == f"repos/{REPO}/releases/7" for read in since_mutation
+            )
+            since_mutation = []
+
+
+@pytest.mark.parametrize("lag", ["missing", "starter", "null_digest", "missing_digest"])
+def test_uploaded_assets_eventually_become_visible_and_complete(assets, tmp_path, lag):
+    fake = FakeGh(assets)
+    lag_reads = 0
+
+    def runner(arguments):
+        nonlocal lag_reads
+        result = fake(arguments)
+        if (
+            method(arguments) == "GET"
+            and fake.uploaded
+            and len(fake.before) == len(assets)
+            and "/assets?" in endpoint(arguments)
+        ):
+            lag_reads += 1
+            if lag_reads <= 2:
+                delayed = [dict(item) for item in fake.after]
+                if lag == "missing":
+                    delayed.pop()
+                elif lag == "starter":
+                    delayed[-1]["state"] = "starter"
+                elif lag == "null_digest":
+                    delayed[-1]["digest"] = None
+                else:
+                    delayed[-1].pop("digest")
+                return response(200, delayed)
+        return result
+
+    publish_fake(fake, assets, tmp_path, runner=runner)
+    assert lag_reads >= 3
+    assert not fake.draft
+
+
+def test_known_created_release_id_can_lag_without_another_create(assets, tmp_path):
+    fake = FakeGh(assets, existing=False)
+    reads = 0
+
+    def runner(arguments):
+        nonlocal reads
+        result = fake(arguments)
+        if method(arguments) == "GET" and endpoint(arguments).endswith("releases/7"):
+            reads += 1
+            if reads <= 2:
+                return response(404, {})
+        return result
+
+    publish_fake(fake, assets, tmp_path, runner=runner)
+    assert reads >= 3
+    assert not fake.draft
+    assert (
+        sum(
+            method(call) == "POST" and endpoint(call).endswith("/releases")
+            for call in fake.calls
+        )
+        == 1
+    )
+
+
+def test_known_release_id_lag_is_bounded_and_cannot_fallback_to_tag_lookup():
+    calls = []
+
+    def runner(arguments):
+        calls.append(arguments)
+        return response(404, {"message": "secret response"})
+
+    with pytest.raises(ValueError):
+        GitHub(REPO, runner).require_draft(7, TAG)
+    assert 2 <= len(calls) <= 10
+    assert all(
+        method(call) == "GET" and endpoint(call) == f"repos/{REPO}/releases/7"
+        for call in calls
+    )
+
+
+@pytest.mark.parametrize("failure", [503, 409, 422, "network"])
+def test_ambiguous_creation_reconciles_by_authenticated_list_without_reposting(
+    assets, tmp_path, failure
+):
+    fake = FakeGh(assets, existing=False)
+    recovery_reads = 0
+
+    def runner(arguments):
+        nonlocal recovery_reads
+        result = fake(arguments)
+        if method(arguments) == "POST" and endpoint(arguments).endswith("/releases"):
+            if failure == "network":
+                return subprocess.CompletedProcess([], 1, "", "credential secret")
+            return response(failure, {"message": "credential secret"})
+        if fake.existing and "releases?" in endpoint(arguments):
+            recovery_reads += 1
+            if recovery_reads == 1:
+                return response(200, [])
+        if endpoint(arguments) == "graphql" and recovery_reads == 1:
+            return response(200, graphql_payload(None))
+        return result
+
+    publish_fake(fake, assets, tmp_path, runner=runner)
+    assert recovery_reads >= 2
+    assert not fake.draft
+    assert (
+        sum(
+            method(call) == "POST" and endpoint(call).endswith("/releases")
+            for call in fake.calls
+        )
+        == 1
+    )
+
+
+def test_ambiguous_creation_with_no_visible_release_stops_without_reposting(
+    assets, tmp_path, capsys
+):
+    fake = FakeGh(assets, existing=False)
+
+    def runner(arguments):
+        result = fake(arguments)
+        if method(arguments) == "POST" and endpoint(arguments).endswith("/releases"):
+            return response(503, {"message": "credential body secret"})
+        if "releases?" in endpoint(arguments):
+            return response(200, [])
+        if endpoint(arguments) == "graphql":
+            return response(200, graphql_payload(None))
+        return result
+
+    with pytest.raises(ValueError) as error:
+        publish_fake(fake, assets, tmp_path, runner=runner)
+    assert "secret" not in str(error.value) and "credential" not in str(error.value)
+    assert (
+        sum(
+            method(call) == "POST" and endpoint(call).endswith("/releases")
+            for call in fake.calls
+        )
+        == 1
+    )
+    assert 2 <= sum("releases?" in endpoint(call) for call in fake.calls) <= 10
+    assert not fake.uploaded and fake.draft
+    output = capsys.readouterr().out
+    assert "secret" not in output and "credential" not in output
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["published", "wrong_tag", "zero_id", "bool_id", "missing_id", "wrong_draft_type"],
+)
+def test_malformed_or_wrong_created_release_response_never_uploads(
+    assets, tmp_path, mutation
+):
+    fake = FakeGh(assets, existing=False)
+
+    def runner(arguments):
+        result = fake(arguments)
+        if method(arguments) == "POST" and endpoint(arguments).endswith("/releases"):
+            item = fake.release()
+            if mutation == "missing_id":
+                item.pop("id")
+            else:
+                field, value = {
+                    "published": ("draft", False),
+                    "wrong_tag": ("tag_name", "v0.1.0b9"),
+                    "zero_id": ("id", 0),
+                    "bool_id": ("id", True),
+                    "wrong_draft_type": ("draft", 1),
+                }[mutation]
+                item[field] = value
+            return response(201, item)
+        return result
+
+    with pytest.raises(ValueError):
+        publish_fake(fake, assets, tmp_path, runner=runner)
+    assert not fake.uploaded
+    assert not any(method(call) == "PATCH" for call in fake.calls)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {},
+        [],
+        {"id": 8, "tag_name": TAG, "draft": True},
+        {"id": 7, "tag_name": "wrong", "draft": True},
+        {"id": 7, "tag_name": TAG, "draft": False},
+        {"id": 7, "tag_name": TAG, "draft": "true"},
+    ],
+)
+def test_known_release_id_metadata_must_match_draft_and_tag(value):
+    def runner(arguments):
+        return response(200, value)
+
+    with pytest.raises(ValueError):
+        GitHub(REPO, runner).require_draft(7, TAG)
+
+
+@pytest.mark.parametrize("failure", [429, 500, 502, 503, "network"])
+def test_safe_get_retries_transient_errors_then_succeeds(failure):
+    calls, delays = [], []
+
+    def runner(arguments):
+        calls.append(arguments)
+        if len(calls) <= 2:
+            if failure == "network":
+                return subprocess.CompletedProcess([], 1, "", "private diagnostic")
+            return response(
+                failure,
+                {"message": "private diagnostic"},
+                headers="Retry-After: 2\n" if failure == 429 else "",
+            )
+        return response(200, {"ok": True})
+
+    github = GitHub(REPO, runner, sleeper=delays.append)
+    assert github.get("test") == {"ok": True}
+    assert len(calls) == 3 and len(delays) == 2
+    assert all(0 <= delay <= 60 for delay in delays)
+
+
+@pytest.mark.parametrize("code", [401, 403, 404])
+def test_nonretryable_get_failure_is_immediate_and_sanitized(code):
+    calls, delays = [], []
+
+    def runner(arguments):
+        calls.append(arguments)
+        return response(code, {"message": "secret credential"})
+
+    with pytest.raises(ValueError) as error:
+        GitHub(REPO, runner, sleeper=delays.append).get("test")
+    assert len(calls) == 1 and not delays
+    assert "secret" not in str(error.value) and "credential" not in str(error.value)
+
+
+@pytest.mark.parametrize("failure", [429, 503, "network"])
+def test_persistent_get_failure_and_retry_headers_are_bounded(failure):
+    calls, delays = [], []
+
+    def runner(arguments):
+        calls.append(arguments)
+        if failure == "network":
+            return subprocess.CompletedProcess([], 1, "", "secret credential")
+        return response(
+            failure,
+            {"message": "secret credential"},
+            headers="Retry-After: 999999999999999999999999\nX-RateLimit-Remaining: 0\nX-RateLimit-Reset: 999999999999999999\n",
+        )
+
+    with pytest.raises(ValueError) as error:
+        GitHub(REPO, runner, sleeper=delays.append).get("test")
+    assert 1 <= len(calls) <= 10
+    assert len(delays) == len(calls) - 1
+    assert all(0 <= delay <= 60 for delay in delays)
+    assert "secret" not in str(error.value) and "credential" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "headers", ["Retry-After: 1\n", "X-RateLimit-Remaining: 0\nX-RateLimit-Reset: 1\n"]
+)
+def test_rate_limited_403_can_retry_when_headers_identify_rate_limit(headers):
+    calls, delays = [], []
+
+    def runner(arguments):
+        calls.append(arguments)
+        return (
+            response(403, {}, headers=headers) if len(calls) == 1 else response(200, [])
+        )
+
+    assert GitHub(REPO, runner, sleeper=delays.append).get("test") == []
+    assert len(calls) == 2 and len(delays) == 1
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "HTTP/2.0 200 Result\n\ninvalid JSON",
+        "not an HTTP response",
+        "HTTP/2.0 200 Result\n\n",
+    ],
+)
+def test_malformed_success_response_is_not_retried(stdout):
+    calls, delays = [], []
+
+    def runner(arguments):
+        calls.append(arguments)
+        return subprocess.CompletedProcess([], 0, stdout, "secret credential")
+
+    with pytest.raises(ValueError):
+        GitHub(REPO, runner, sleeper=delays.append).get("test")
+    assert len(calls) == 1 and not delays
+
+
+@pytest.mark.parametrize("failure", [503, "network"])
+def test_ambiguous_final_patch_checks_publication_by_id_without_repatching(
+    assets, tmp_path, failure
+):
+    fake = FakeGh(assets)
+
+    def runner(arguments):
+        result = fake(arguments)
+        if method(arguments) == "PATCH":
+            return (
+                response(503, {"message": "secret"})
+                if failure == 503
+                else subprocess.CompletedProcess([], 1, "", "secret")
+            )
+        return result
+
+    publish_fake(fake, assets, tmp_path, runner=runner)
+    assert not fake.draft
+    assert sum(method(call) == "PATCH" for call in fake.calls) == 1
+    patch_index = next(
+        index for index, call in enumerate(fake.calls) if method(call) == "PATCH"
+    )
+    recovery_reads = fake.calls[patch_index + 1 :]
+    assert all(method(call) == "GET" for call in recovery_reads)
+    assert any(endpoint(call) == f"repos/{REPO}/releases/7" for call in recovery_reads)
+    assert any("/releases/7/assets?" in endpoint(call) for call in recovery_reads)
+    assert endpoint(recovery_reads[-1]) == f"repos/{REPO}/git/ref/tags/{TAG}"
+    assert sum("git/ref/tags/" in endpoint(call) for call in fake.calls) == 4
+
+
+def test_unconfirmed_final_patch_does_not_claim_draft_is_retained(
+    assets, tmp_path, capsys
+):
+    fake = FakeGh(assets)
+
+    def runner(arguments):
+        result = fake(arguments)
+        if method(arguments) == "PATCH":
+            return response(503, {"message": "secret credential"})
+        if (
+            not fake.draft
+            and method(arguments) == "GET"
+            and endpoint(arguments).endswith("releases/7")
+        ):
+            return response(503, {"message": "secret credential"})
+        return result
+
+    with pytest.raises(ValueError) as error:
+        publish_fake(fake, assets, tmp_path, runner=runner)
+    assert "draft is retained" not in str(error.value)
+    assert "secret" not in str(error.value) and "credential" not in str(error.value)
+    assert sum(method(call) == "PATCH" for call in fake.calls) == 1
+    output = capsys.readouterr().out
+    assert "secret" not in output and "credential" not in output
+
+
+@pytest.mark.parametrize("mutation", ["wrong_id", "wrong_tag", "still_draft"])
+def test_final_patch_response_must_describe_the_same_published_release(
+    assets, tmp_path, mutation
+):
+    fake = FakeGh(assets)
+
+    def runner(arguments):
+        result = fake(arguments)
+        if method(arguments) == "PATCH":
+            item = fake.release()
+            field, value = {
+                "wrong_id": ("id", 8),
+                "wrong_tag": ("tag_name", "wrong"),
+                "still_draft": ("draft", True),
+            }[mutation]
+            item[field] = value
+            return response(200, item)
+        return result
+
+    with pytest.raises(ValueError):
+        publish_fake(fake, assets, tmp_path, runner=runner)
+    assert sum(method(call) == "PATCH" for call in fake.calls) == 1
+
+
+@pytest.mark.parametrize("mutation", ["different_id", "duplicate", "published"])
+def test_visible_release_list_replacement_after_upload_stops_patch(
+    assets, tmp_path, mutation
+):
+    fake = FakeGh(assets)
+
+    def runner(arguments):
+        result = fake(arguments)
+        if fake.uploaded and "releases?" in endpoint(arguments):
+            item = fake.release()
+            if mutation == "different_id":
+                item["id"] = 8
+            elif mutation == "published":
+                item["draft"] = False
+            return response(
+                200, [item, dict(item, id=8)] if mutation == "duplicate" else [item]
+            )
+        return result
+
+    with pytest.raises(ValueError):
+        publish_fake(fake, assets, tmp_path, runner=runner)
+    assert not any(method(call) == "PATCH" for call in fake.calls)
+
+
+@pytest.mark.parametrize("failure", [503, 409, 422, "network", "exception"])
+def test_ambiguous_asset_upload_is_confirmed_without_a_second_upload(
+    assets, tmp_path, failure
+):
+    fake = FakeGh(assets)
+    fake.before = remote(assets)[1:]
+    upload_count = 0
+
+    def runner(arguments):
+        nonlocal upload_count
+        result = fake(arguments)
+        if endpoint(arguments).startswith("https://uploads.github.com/"):
+            upload_count += 1
+            if failure == "network":
+                return subprocess.CompletedProcess([], 1, "", "secret credential")
+            if failure == "exception":
+                raise ValueError("secret credential")
+            return response(failure, {"message": "secret credential"})
+        return result
+
+    publish_fake(fake, assets, tmp_path, runner=runner)
+    assert upload_count == 1
+    assert not fake.draft
+
+
+def test_unconfirmed_asset_upload_remains_bounded_and_never_reposts(
+    assets, tmp_path, capsys
+):
+    fake = FakeGh(assets)
+    fake.before = remote(assets)[1:]
+    reads = 0
+
+    def runner(arguments):
+        nonlocal reads
+        result = fake(arguments)
+        if endpoint(arguments).startswith("https://uploads.github.com/"):
+            fake.before.pop()
+            return response(503, {"message": "secret credential"})
+        if (
+            fake.uploaded
+            and method(arguments) == "GET"
+            and "/assets?" in endpoint(arguments)
+        ):
+            reads += 1
+        return result
+
+    with pytest.raises(ValueError):
+        publish_fake(fake, assets, tmp_path, runner=runner)
+    assert 2 <= reads <= 10
+    assert (
+        sum(
+            endpoint(call).startswith("https://uploads.github.com/")
+            for call in fake.calls
+        )
+        == 1
+    )
+    assert not any(method(call) == "PATCH" for call in fake.calls)
+    assert fake.draft
+    output = capsys.readouterr().out
+    assert "secret" not in output and "credential" not in output
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_denied_creation_is_not_reconciled_or_repeated(assets, tmp_path, code):
+    fake = FakeGh(assets, existing=False)
+
+    def runner(arguments):
+        result = fake(arguments)
+        if method(arguments) == "POST" and endpoint(arguments).endswith("/releases"):
+            return response(code, {"message": "secret credential"})
+        return result
+
+    with pytest.raises(ValueError):
+        publish_fake(fake, assets, tmp_path, runner=runner)
+    assert len(writes(fake)) == 1
+    assert sum("releases?" in endpoint(call) for call in fake.calls) == 1
+    assert not fake.uploaded
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        "Retry-After: nonsense\n",
+        "Retry-After: -1\n",
+        "X-RateLimit-Remaining: 0\nX-RateLimit-Reset: secret\n",
+        "Retry-After: 61\n",
+    ],
+)
+def test_invalid_or_over_budget_retry_metadata_stops_without_waiting(headers):
+    calls, delays = [], []
+
+    def runner(arguments):
+        calls.append(arguments)
+        return response(429, {"message": "secret credential"}, headers=headers)
+
+    with pytest.raises(ValueError) as error:
+        GitHub(REPO, runner, sleeper=delays.append).get("test")
+    assert len(calls) == 1 and not delays
+    assert "secret" not in str(error.value) and "credential" not in str(error.value)
+
+
+@pytest.mark.parametrize("failure", [503, "network"])
+def test_persistent_get_transient_failure_exhausts_small_retry_count(failure):
+    calls, delays = [], []
+
+    def runner(arguments):
+        calls.append(arguments)
+        return (
+            response(failure, {})
+            if failure == 503
+            else subprocess.CompletedProcess([], 1, "", "private")
+        )
+
+    with pytest.raises(ValueError):
+        GitHub(REPO, runner, sleeper=delays.append).get("test")
+    assert 2 <= len(calls) <= 10
+    assert len(delays) == len(calls) - 1
+    assert sum(delays) <= 120
+
+
+def test_asset_upload_url_encodes_name_and_uses_separate_input_argument(tmp_path):
+    name = "archive space&?.zip"
+    path = tmp_path / name
+    path.write_bytes(b"archive")
+    expected = {
+        name: Asset(path, 7, "sha256:" + hashlib.sha256(b"archive").hexdigest())
+    }
+    fake = FakeGh(expected)
+    fake.before = []
+    GitHub(REPO, fake).upload_assets(7, TAG, expected, [])
+    upload = writes(fake)[0]
+    assert endpoint(upload).endswith("assets?name=archive%20space%26%3F.zip")
+    assert upload[upload.index("--input") + 1] == str(path)
+
+
+def test_uncertain_final_patch_that_stays_draft_is_not_repeated(assets, tmp_path):
+    fake = FakeGh(assets)
+    after_patch_reads = 0
+
+    def runner(arguments):
+        nonlocal after_patch_reads
+        result = fake(arguments)
+        if method(arguments) == "PATCH":
+            fake.draft = True
+            return response(503, {"message": "secret credential"})
+        if (
+            any(method(call) == "PATCH" for call in fake.calls)
+            and method(arguments) == "GET"
+            and endpoint(arguments).endswith("releases/7")
+        ):
+            after_patch_reads += 1
+        return result
+
+    with pytest.raises(ValueError) as error:
+        publish_fake(fake, assets, tmp_path, runner=runner)
+    assert 2 <= after_patch_reads <= 10
+    assert sum(method(call) == "PATCH" for call in fake.calls) == 1
+    assert "draft is retained" not in str(error.value)
+
+
+def test_final_patch_wrong_prerelease_flag_is_unconfirmed(assets, tmp_path):
+    fake = FakeGh(assets)
+
+    def runner(arguments):
+        result = fake(arguments)
+        if method(arguments) == "PATCH":
+            return response(200, dict(fake.release(), prerelease=False))
+        return result
+
+    with pytest.raises(ValueError, match="could not be confirmed"):
+        publish_fake(fake, assets, tmp_path, runner=runner)
+    assert sum(method(call) == "PATCH" for call in fake.calls) == 1
+
+
+@pytest.mark.parametrize("operation", ["create", "upload", "patch"])
+@pytest.mark.parametrize("damage", ["invalid_json", "incomplete", "cli_failure"])
+def test_accepted_mutation_with_uncertain_response_reconciles_without_repeating(
+    assets, tmp_path, capsys, operation, damage
+):
+    fake = FakeGh(assets, existing=operation != "create")
+    if operation == "upload":
+        fake.before = remote(assets)[1:]
+    damaged_calls = 0
+
+    def runner(arguments):
+        nonlocal damaged_calls
+        result = fake(arguments)
+        selected = (
+            (
+                operation == "create"
+                and method(arguments) == "POST"
+                and endpoint(arguments).endswith("/releases")
+            )
+            or (
+                operation == "upload"
+                and endpoint(arguments).startswith("https://uploads.github.com/")
+            )
+            or (operation == "patch" and method(arguments) == "PATCH")
+        )
+        if selected:
+            damaged_calls += 1
+            status = 200 if operation == "patch" else 201
+            if damage == "cli_failure":
+                result.returncode = 1
+                result.stderr = "secret credential"
+                return result
+            output = f"HTTP/2.0 {status} Result" + (
+                "\n\nsecret credential" if damage == "invalid_json" else ""
+            )
+            return subprocess.CompletedProcess([], 0, output, "secret credential")
+        return result
+
+    publish_fake(fake, assets, tmp_path, runner=runner)
+    assert damaged_calls == 1
+    assert not fake.draft
+    output = capsys.readouterr().out
+    assert "secret" not in output and "credential" not in output
+
+
+def test_bare_rate_limit_429_does_not_retry_before_required_wait():
+    calls, delays = [], []
+
+    def runner(arguments):
+        calls.append(arguments)
+        return response(429, {"message": "secret credential"})
+
+    with pytest.raises(ValueError):
+        GitHub(REPO, runner, sleeper=delays.append).get("test")
+    assert len(calls) == 1 and not delays
+
+
+def test_existing_draft_hidden_from_rest_list_is_found_by_graphql(assets, tmp_path):
+    fake = FakeGh(assets)
+
+    def runner(arguments):
+        result = fake(arguments)
+        return response(200, []) if "releases?" in endpoint(arguments) else result
+
+    publish_fake(fake, assets, tmp_path, runner=runner)
+    assert not fake.draft
+    assert not any(endpoint(call).endswith("/releases") for call in writes(fake))
+    reads = [call for call in fake.calls if endpoint(call) == "graphql"]
+    assert len(reads) == 1
+    assert method(reads[0]) == "POST"
+    query_fields = fields(reads[0])
+    assert query_fields["owner"] == "owner"
+    assert query_fields["name"] == "repository"
+    assert query_fields["tag"] == TAG
+    assert "query" in query_fields and "release(tagName:" in query_fields["query"]
+
+
+def test_null_graphql_release_and_empty_rest_list_allow_one_creation(assets, tmp_path):
+    fake = FakeGh(assets, existing=False)
+    publish_fake(fake, assets, tmp_path)
+    assert not fake.draft
+    assert sum(endpoint(call) == "graphql" for call in fake.calls) == 1
+    assert sum(endpoint(call).endswith("/releases") for call in writes(fake)) == 1
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        {"databaseId": 7, "isDraft": False, "tagName": TAG},
+        {"databaseId": 7, "isDraft": True, "tagName": "wrong"},
+        {"databaseId": 0, "isDraft": True, "tagName": TAG},
+        {"databaseId": -1, "isDraft": True, "tagName": TAG},
+        {"databaseId": True, "isDraft": True, "tagName": TAG},
+        {"databaseId": "7", "isDraft": True, "tagName": TAG},
+        {"databaseId": 7, "isDraft": "true", "tagName": TAG},
+        {"databaseId": 7, "isDraft": 1, "tagName": TAG},
+        {"databaseId": 7, "isDraft": True},
+        {"databaseId": 7, "tagName": TAG},
+        {"isDraft": True, "tagName": TAG},
+        {},
+        [],
+        "secret credential",
+    ],
+)
+def test_invalid_graphql_discovery_never_creates_or_mutates_a_release(
+    assets, tmp_path, item
+):
+    fake = FakeGh(assets)
+
+    def runner(arguments):
+        result = fake(arguments)
+        if "releases?" in endpoint(arguments):
+            return response(200, [])
+        if endpoint(arguments) == "graphql":
+            return response(200, graphql_payload(item))
+        return result
+
+    with pytest.raises(ValueError) as error:
+        publish_fake(fake, assets, tmp_path, runner=runner)
+    assert not writes(fake)
+    assert "secret" not in str(error.value) and "credential" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        [],
+        {"data": None},
+        {"data": {}},
+        {"data": {"repository": None}},
+        {"data": {"repository": {}}},
+        {"errors": [{"message": "secret credential"}]},
+        {
+            "data": {"repository": {"release": None}},
+            "errors": [{"message": "secret credential"}],
+        },
+    ],
+)
+def test_malformed_or_error_graphql_payload_does_not_mean_release_absence(
+    assets, tmp_path, capsys, payload
+):
+    fake = FakeGh(assets)
+
+    def runner(arguments):
+        result = fake(arguments)
+        if "releases?" in endpoint(arguments):
+            return response(200, [])
+        if endpoint(arguments) == "graphql":
+            return response(200, payload)
+        return result
+
+    with pytest.raises(ValueError) as error:
+        publish_fake(fake, assets, tmp_path, runner=runner)
+    assert not writes(fake)
+    assert "secret" not in str(error.value) and "credential" not in str(error.value)
+    output = capsys.readouterr().out
+    assert "secret" not in output and "credential" not in output
+
+
+def test_graphql_release_id_must_match_the_followup_rest_identity(assets, tmp_path):
+    fake = FakeGh(assets)
+
+    def runner(arguments):
+        if endpoint(arguments).endswith("releases/8"):
+            fake.calls.append(arguments)
+            return response(200, fake.release())
+        result = fake(arguments)
+        if "releases?" in endpoint(arguments):
+            return response(200, [])
+        if endpoint(arguments) == "graphql":
+            return response(
+                200, graphql_payload({"databaseId": 8, "isDraft": True, "tagName": TAG})
+            )
+        return result
+
+    with pytest.raises(ValueError):
+        publish_fake(fake, assets, tmp_path, runner=runner)
+    assert not writes(fake)
+    assert any(endpoint(call).endswith("releases/8") for call in fake.calls)
+
+
+@pytest.mark.parametrize("failure", [503, 429, "network"])
+def test_read_only_graphql_post_can_retry_then_find_the_hidden_draft(
+    assets, tmp_path, failure
+):
+    fake = FakeGh(assets)
+    graph_reads = 0
+
+    def runner(arguments):
+        nonlocal graph_reads
+        result = fake(arguments)
+        if "releases?" in endpoint(arguments):
+            return response(200, [])
+        if endpoint(arguments) == "graphql":
+            graph_reads += 1
+            if graph_reads <= 2:
+                if failure == "network":
+                    return subprocess.CompletedProcess([], 1, "", "secret credential")
+                return response(
+                    failure,
+                    {"message": "secret credential"},
+                    headers="Retry-After: 1\n" if failure == 429 else "",
+                )
+        return result
+
+    publish_fake(fake, assets, tmp_path, runner=runner)
+    assert graph_reads == 3
+    assert not fake.draft
+    assert not any(endpoint(call).endswith("/releases") for call in writes(fake))
+
+
+@pytest.mark.parametrize("code", [401, 403, 404])
+def test_graphql_api_permission_or_endpoint_failure_never_creates_a_release(
+    assets, tmp_path, code
+):
+    fake = FakeGh(assets)
+    graph_reads = 0
+
+    def runner(arguments):
+        nonlocal graph_reads
+        result = fake(arguments)
+        if "releases?" in endpoint(arguments):
+            return response(200, [])
+        if endpoint(arguments) == "graphql":
+            graph_reads += 1
+            return response(code, {"message": "secret credential"})
+        return result
+
+    with pytest.raises(ValueError):
+        publish_fake(fake, assets, tmp_path, runner=runner)
+    assert graph_reads == 1
+    assert not writes(fake)
+
+
+@pytest.mark.parametrize("mutation", ["missing", "extra", "digest", "changed_tag"])
+def test_recovered_patch_requires_fresh_published_bytes_and_tested_tag(
+    assets, tmp_path, capsys, mutation
+):
+    fake = FakeGh(assets)
+    patch_seen = False
+    altered = [dict(item) for item in fake.after]
+    if mutation == "missing":
+        altered.pop()
+    elif mutation == "extra":
+        altered.append({"id": 99, "name": "secret-credential.json"})
+    elif mutation == "digest":
+        altered[0]["digest"] = "sha256:" + "0" * 64
+    else:
+        fake.commits[3] = OTHER_COMMIT
+
+    def runner(arguments):
+        nonlocal patch_seen
+        result = fake(arguments)
+        if method(arguments) == "PATCH":
+            patch_seen = True
+            return response(503, {"message": "secret credential"})
+        if (
+            patch_seen
+            and method(arguments) == "GET"
+            and "/assets?" in endpoint(arguments)
+        ):
+            return response(200, altered)
+        return result
+
+    with pytest.raises(ValueError, match="inspect the GitHub release") as error:
+        publish_fake(fake, assets, tmp_path, runner=runner)
+    assert not fake.draft
+    assert sum(method(call) == "PATCH" for call in fake.calls) == 1
+    patch_index = next(
+        index for index, call in enumerate(fake.calls) if method(call) == "PATCH"
+    )
+    assert all(method(call) == "GET" for call in fake.calls[patch_index + 1 :])
+    assert any("/assets?" in endpoint(call) for call in fake.calls[patch_index + 1 :])
+    assert "draft is retained" not in str(error.value)
+    assert "secret" not in str(error.value) and "credential" not in str(error.value)
+    output = capsys.readouterr().out
+    assert "secret" not in output and "credential" not in output
+
+
+def test_known_release_asset_endpoint_recovers_from_initial_404(assets):
+    calls, delays = [], []
+    expected = remote(assets)
+
+    def runner(arguments):
+        calls.append(arguments)
+        return response(404, {}) if len(calls) == 1 else response(200, expected)
+
+    assert GitHub(REPO, runner, sleeper=delays.append).assets(7) == expected
+    assert len(calls) == 2 and len(delays) == 1
+    assert 0 < sum(delays) <= 120
+    assert all(
+        method(call) == "GET"
+        and endpoint(call) == f"repos/{REPO}/releases/7/assets?per_page=100&page=1"
+        for call in calls
+    )
+
+
+def test_persistent_known_release_asset_404_stops_before_any_mutation(assets, tmp_path):
+    fake = FakeGh(assets)
+    asset_reads = 0
+
+    def runner(arguments):
+        nonlocal asset_reads
+        result = fake(arguments)
+        if method(arguments) == "GET" and "/assets?" in endpoint(arguments):
+            asset_reads += 1
+            return response(404, {"message": "secret credential"})
+        return result
+
+    with pytest.raises(ValueError) as error:
+        publish_fake(fake, assets, tmp_path, runner=runner)
+    assert asset_reads == 5
+    assert not writes(fake)
+    assert "secret" not in str(error.value) and "credential" not in str(error.value)

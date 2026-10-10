@@ -70,7 +70,7 @@ jobs:
         run: |
           python3 .github/workflows/release_metadata.py \
             --tag "$RELEASE_TAG" --dist dist
-      - name: Validate the draft and remote tag, upload, then publish
+      - name: Validate the pinned draft, reuse or upload assets, then publish
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
