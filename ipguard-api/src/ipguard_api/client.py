@@ -2,10 +2,12 @@
 
 import asyncio
 import logging
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from functools import wraps
 from struct import error as StructError
+from time import monotonic
 from types import TracebackType
 from typing import Concatenate
 from uuid import UUID, uuid4
@@ -29,7 +31,9 @@ from .models import (
     DEFAULT_SECURE_ENDPOINT,
     AndroidProfile,
     AuthIdentifier,
+    Board,
     ClientSnapshot,
+    IncomingCall,
     Relay,
     Session,
     SessionStatus,
@@ -37,13 +41,14 @@ from .models import (
 from .protocol import (
     Packet,
     configuration_password,
+    door_inventory,
     envelope,
     hello,
     identifier_fields,
+    incoming_call,
     packet_body,
     packet_event,
     packet_sender,
-    relay_inventory,
 )
 from .transport import ZmqTransport
 from .validation import (
@@ -55,6 +60,9 @@ from .validation import (
 )
 
 type Listener = Callable[[ClientSnapshot], None]
+type CallListener = Callable[[IncomingCall], None]
+MAX_RECENT_CALLS = 256
+RECENT_CALL_TTL = 15 * 60
 _LOGGER = logging.getLogger(__name__)
 _LOGGED_EVENTS = frozenset(
     {
@@ -119,6 +127,9 @@ class IpguardClient:
         self._transport: ZmqTransport | None = None
         self._reconnect_task: asyncio.Task[None] | None = None
         self._listeners: set[Listener] = set()
+        self._call_listeners: set[CallListener] = set()
+        self._call_tokens: OrderedDict[bytes, float] = OrderedDict()
+        self._call_boards: dict[str, Board] = {}
         self._relays: tuple[Relay, ...] = ()
         self._connected = False
         self._revoked = False
@@ -151,6 +162,17 @@ class IpguardClient:
         """Register a synchronous event-loop callback; return its removal function."""
         self._listeners.add(callback)
         return lambda: self._listeners.discard(callback)
+
+    def subscribe_calls(self, callback: CallListener) -> Callable[[], None]:
+        """Subscribe to sanitized incoming offers; no call response is sent.
+
+        Callbacks run synchronously on the event loop. Notifications are not
+        replayed to later subscribers. The removal function is idempotent.
+        Duplicate tokens are remembered across reconnects for 15 minutes after
+        their last receipt, subject to a limit of 256 recent tokens.
+        """
+        self._call_listeners.add(callback)
+        return lambda: self._call_listeners.discard(callback)
 
     def _notify(self) -> None:
         snapshot = self.snapshot
@@ -186,6 +208,9 @@ class IpguardClient:
                 else str(uuid4())
             )
         )
+        if self._identity != (old.identity if old else previous_identity):
+            self._call_tokens.clear()
+        self._call_boards.clear()
         self._identifier, self._label = auth, label
         self._session = None
         self._revoked, self._closed, self._error = False, False, None
@@ -303,6 +328,9 @@ class IpguardClient:
         if session.status is not SessionStatus.ACTIVATED:
             raise AuthenticationError("Saved installation enrollment is incomplete.")
         await self._stop_connection()
+        if self._session is None or self._session.identity != session.identity:
+            self._call_tokens.clear()
+        self._call_boards.clear()
         self._closed, self._revoked, self._error = False, False, None
         self._session = replace(session, android_profile=AndroidProfile())
         self._identity, self._identifier, self._label = (
@@ -491,17 +519,63 @@ class IpguardClient:
         self._failure_ready.clear()
         self._configuration_ready.clear()
         key = self._session.server_public_key if secure and self._session else None
+
+        async def receive(packet: Packet) -> None:
+            if packet_event(packet) == "ps_sp_sdp_offer":
+                self._receive_call(packet, transport)
+            else:
+                await self._on_packet(packet)
+
         transport = ZmqTransport(
             self._identity,
             self._secure_endpoint if secure else self._activation_endpoint,
             self.timeout,
-            self._on_packet,
+            receive,
             self._on_failure,
             key,
         )
         self._transport = transport
         await transport.async_start()
         return transport
+
+    def _receive_call(self, packet: Packet, transport: ZmqTransport) -> None:
+        session = self._session
+        if (
+            self._closed
+            or self._revoked
+            or self._error is not None
+            or self._transport is not transport
+            or transport.closed
+            or session is None
+            or session.status is not SessionStatus.ACTIVATED
+            or transport.server_key is None
+            or transport.server_key != session.server_public_key
+            or transport.identity != session.identity
+        ):
+            return
+        parsed = incoming_call(packet, self._call_boards)
+        if parsed is None:
+            return
+        call, token_hash = parsed
+        now = monotonic()
+        while (
+            self._call_tokens
+            and next(iter(self._call_tokens.values())) <= now - RECENT_CALL_TTL
+        ):
+            self._call_tokens.popitem(last=False)
+        if token_hash in self._call_tokens:
+            self._call_tokens[token_hash] = now
+            self._call_tokens.move_to_end(token_hash)
+            return
+        self._call_tokens[token_hash] = now
+        if len(self._call_tokens) > MAX_RECENT_CALLS:
+            self._call_tokens.popitem(last=False)
+        for callback in tuple(self._call_listeners):
+            try:
+                callback(call)
+            except Exception:
+                # Callback errors may contain private downstream data.
+                continue
 
     async def _on_packet(self, packet: Packet) -> None:
         event, body = packet_event(packet), packet_body(packet)
@@ -514,7 +588,18 @@ class IpguardClient:
             self._session = replace(self._session, status=SessionStatus.DISABLED)
             raise AuthRevokedError("IPGUARD revoked this activated installation.")
         if event == "bc_sp_relays":
-            self._relays = relay_inventory(body)
+            boards, self._relays = door_inventory(body)
+            unique: dict[str, Board] = {}
+            ambiguous: set[str] = set()
+            for board in boards:
+                if board.identity in unique:
+                    ambiguous.add(board.identity)
+                unique[board.identity] = board
+            self._call_boards = {
+                identity: board
+                for identity, board in unique.items()
+                if identity not in ambiguous
+            }
             self._inventory_ready.set()
             self._notify()
         if event == "srv_sp_update" and isinstance(body.get("token"), str):
@@ -569,7 +654,6 @@ class IpguardClient:
                 _LOGGER.debug("IPGUARD reconnect scheduled")
                 await asyncio.sleep(delay)
                 try:
-                    self._error = None
                     await self._connect_saved()
                     return
                 except AuthRevokedError:
@@ -596,6 +680,9 @@ class IpguardClient:
         await self._stop_connection()
         self._notify()
         self._listeners.clear()
+        self._call_listeners.clear()
+        self._call_tokens.clear()
+        self._call_boards.clear()
         self._verification_requested = False
         self._identifier, self._identity, self._label = None, "", ""
         if self._session and self._session.status is SessionStatus.PENDING:

@@ -72,6 +72,7 @@ async def test_startup_push_and_unload_without_sms(
         runtime = entry.runtime_data
         assert await hass.config_entries.async_unload(entry.entry_id)
         client.unsubscribe.assert_called_once()
+        client.unsubscribe_calls.assert_called_once()
         client.async_close.assert_awaited_once()
         assert all(
             state.state == STATE_UNAVAILABLE
@@ -138,6 +139,7 @@ async def test_setup_failures_close_resources(
     ):
         await async_setup_entry(hass, entry)
     client.unsubscribe.assert_called_once()
+    client.unsubscribe_calls.assert_called_once()
     client.async_close.assert_awaited_once()
     client.async_release.assert_not_awaited()
 
@@ -184,6 +186,7 @@ async def test_failed_platform_unload_keeps_active_client(
         ):
             assert not await async_unload_entry(hass, entry)
         client.async_close.assert_not_awaited()
+        client.unsubscribe_calls.assert_not_called()
         assert await hass.config_entries.async_unload(entry.entry_id)
 
 

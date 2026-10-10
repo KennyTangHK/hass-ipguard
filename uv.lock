@@ -1031,7 +1031,7 @@ wheels = [
 
 [[package]]
 name = "ha-ipguard"
-version = "0.1.0b2"
+version = "0.1.0b3"
 source = { editable = "." }
 dependencies = [
     { name = "ipguard-api" },
@@ -1288,7 +1288,7 @@ wheels = [
 
 [[package]]
 name = "ipguard-api"
-version = "0.1.0b2"
+version = "0.1.0b3"
 source = { editable = "ipguard-api" }
 dependencies = [
     { name = "pyzmq" },

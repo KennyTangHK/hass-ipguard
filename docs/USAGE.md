@@ -37,6 +37,32 @@ Setup verifies the saved authorization and relay inventory without opening a doo
 
 The integration sends Android-compatible handset metadata. Its local display name is not sent to IPGUARD as an installation label.
 
+## Incoming call notifications
+
+Each account has an **incoming call** event entity with the doorbell device class, including accounts without remotely releasable relays. It emits `ring` when a valid incoming offer arrives over the account's existing ZeroMQ connection. It does not register with Firebase, answer or acknowledge the call, negotiate media, or release a door.
+
+Use the entity's **Ring** trigger in an automation. For example, replace the entity ID below with the one shown in **Settings → Devices & services → IPGUARD → Entities**:
+
+```yaml
+alias: IPGUARD incoming call
+triggers:
+  - trigger: event.received
+    target:
+      entity_id: event.your_account_incoming_call
+    options:
+      event_type:
+        - ring
+actions:
+  - action: persistent_notification.create
+    data:
+      title: Intercom
+      message: Someone is calling from the intercom.
+```
+
+The event state is the last ring's timestamp, rather than a ringing on/off status. When the caller matches the latest cached inventory, attributes include `board_id`, `board_name`, `site_id` and `site_name`; unknown callers still ring without those details. Call tokens and media credentials are not exposed. Repeated offers are suppressed. Restoring the last timestamp after restart does not trigger a new notification.
+
+The entity becomes unavailable when disconnected or authorization is revoked. Calls while disconnected cannot be recovered. Calls received while the current secure connection is getting ready are buffered briefly in memory and discarded on connection failure or unload. Live delivery with the integration's empty mobile push token has not yet been verified for a real account.
+
 ## Release buttons
 
 Each permitted remote relay appears as a button attached to its intercom board. Use **button.press** in the interface or an automation. You can rename entities in Home Assistant without changing their board/relay identity.
@@ -51,6 +77,7 @@ A matching acknowledgement confirms that the board acknowledged the command. It 
 - **Invalid code or authorization:** enter the code as text, preserving leading zeros. A revoked activated installation requires explicit reauthentication through Devices & services.
 - **Existing installation:** decide on the dedicated confirmation screen whether replacing the prior mobile installation is acceptable.
 - **No buttons:** check the official app's badge confirmation and remote access permissions. Access that only works over Bluetooth does not create a cloud button.
+- **No incoming notifications:** check that the doorbell entity is available and the automation uses its Ring trigger. A local test does not establish provider delivery for your account; no Firebase fallback is included.
 - **Unknown release outcome:** there was no matching acknowledgement. Do not assume the command failed or that the door is closed.
 - **Dependency installation failed:** verify PyPI access and a supported Python/architecture. The generated bundle includes the SDK but relies on the native PyZMQ dependency.
 

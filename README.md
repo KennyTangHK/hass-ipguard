@@ -5,7 +5,7 @@
 [![Home Assistant integration](https://img.shields.io/badge/Home%20Assistant-Integration-41BDF5.svg)](https://www.home-assistant.io/)
 [![Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-Open your building's entrance from Home Assistant using your existing IPGUARD account. Each relay that your account can release remotely appears as a button on its intercom device.
+Receive incoming intercom calls as Home Assistant doorbell events and open your building's entrance using your existing IPGUARD account. Each permitted remote relay appears as a button on its intercom device.
 
 > **Beta:** this integration is intended for testing and is not a stable release.
 
@@ -19,12 +19,13 @@ Use it lawfully, only with your own authorized account and buildings or doors yo
 
 ## Features
 
+- Incoming call doorbell events over the existing cloud connection.
 - Cloud release buttons for permitted relays, grouped by intercom board.
 - Guided setup with phone or email verification and explicit consent before replacing a mobile installation.
 - Saved authorization across restarts, automatic reconnection, and availability updates when access changes.
 - One transmission per press; uncertain results are never automatically retried.
 
-Buttons report command acknowledgement. They do not measure whether a door is open or locked. Bluetooth, SIP and video calls are outside this integration's scope.
+Incoming calls emit a `ring` event without answering, acknowledging the call or opening a door. Firebase, call controls, Bluetooth, SIP and video are outside this integration's scope. Buttons report command acknowledgement; they do not measure whether a door is open or locked.
 
 ## Requirements
 
@@ -70,6 +71,8 @@ If an existing mobile installation is detected, setup asks separately whether to
 
 Add a release button to a dashboard or call `button.press` in an automation. Buttons become unavailable when the cloud connection is lost or release permission is removed. An account without eligible remote relays can finish setup without creating buttons.
 
+Each account also has an **incoming call** doorbell event entity. Use its **Ring** trigger to create notifications or other automations; see the [doorbell automation example](docs/USAGE.md#incoming-call-notifications). Known callers include board and site details. Call delivery with an empty mobile push token still needs confirmation on your account.
+
 If a press reports an unknown outcome, the command may have reached the board without a matching acknowledgement. Check the entrance before choosing to press again.
 
 ## Help and documentation
@@ -77,5 +80,5 @@ If a press reports an unknown outcome, the command may have reached the board wi
 - [Usage and troubleshooting](docs/USAGE.md) — manual installation, logging, updates and removal.
 - [Report an issue](https://github.com/KennyTangHK/hass-ipguard/issues) — describe the problem without sharing verification codes or Home Assistant's `.storage` files.
 - [Development](DEVELOPMENT.md) — Python setup, tests, packaging and releases.
-- [Protocol notes](docs/PROTOCOL.md) and [Android metadata](docs/ANDROID_METADATA.md) — message contracts and compatibility limits.
+- [Protocol notes](docs/PROTOCOL.md) — supported behavior and compatibility limits.
 - [Python API library](ipguard-api/README.md) — the independently packaged protocol client.

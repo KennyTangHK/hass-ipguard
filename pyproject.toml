@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ha-ipguard"
-version = "0.1.0b2"
-description = "Beta IPGUARD cloud door-release buttons for Home Assistant"
+version = "0.1.0b3"
+description = "IPGUARD cloud door-release buttons and incoming call events for Home Assistant"
 readme = "README.md"
 requires-python = ">=3.14.2,<3.15"
 license = "Apache-2.0"
-dependencies = ["ipguard-api==0.1.0b2"]
+dependencies = ["ipguard-api==0.1.0b3"]
 
 [project.urls]
 Repository = "https://github.com/KennyTangHK/hass-ipguard"
@@ -27,6 +27,7 @@ only-include = [
     "custom_components/ipguard/button.py",
     "custom_components/ipguard/config_flow.py",
     "custom_components/ipguard/const.py",
+    "custom_components/ipguard/event.py",
     "custom_components/ipguard/manifest.json",
     "custom_components/ipguard/quality_scale.yaml",
     "custom_components/ipguard/runtime.py",
@@ -46,12 +47,12 @@ only-include = [
     "custom_components/ipguard/button.py",
     "custom_components/ipguard/config_flow.py",
     "custom_components/ipguard/const.py",
+    "custom_components/ipguard/event.py",
     "custom_components/ipguard/manifest.json",
     "custom_components/ipguard/quality_scale.yaml",
     "custom_components/ipguard/runtime.py",
     "custom_components/ipguard/strings.json",
     "custom_components/ipguard/translations/en.json",
-    "docs/ANDROID_METADATA.md",
     "docs/PROTOCOL.md",
     "docs/USAGE.md",
     "README.md",

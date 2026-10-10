@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import hashlib
 import importlib
 import importlib.metadata
@@ -138,6 +139,22 @@ class CloudFixture:
             },
         )
 
+    async def incoming_call(self, token: str, remote_identity: str = BOARD) -> None:
+        assert self.routing_id is not None
+        await self.send(
+            self.secure,
+            self.routing_id,
+            "ps_sp_sdp_offer",
+            {
+                "remoteIdentity": remote_identity,
+                "sdp": base64.b64encode(
+                    b"v=0\r\na=ice-pwd:fixture-private-media-secret\r\n"
+                ).decode(),
+            },
+            token,
+            "fixture-call-service",
+        )
+
     async def serve(self, socket: zmq.asyncio.Socket, *, secure: bool) -> None:
         while True:
             frames = await socket.recv_multipart()
@@ -165,6 +182,7 @@ class CloudFixture:
                 assert body["type"] == 0 and body["version"] == "3.4.8"
                 data = body["data"]
                 assert data["without_sip"] is True
+                assert data["fcm_token"] == ""
                 assert data["os_version"] == "14" and data["connectionInfo"] == "WiFi"
                 if secure:
                     self.routing_id = routing_id
@@ -260,6 +278,71 @@ async def wait_for_state(hass: HomeAssistant, entity_id: str, state: str) -> Non
         unsubscribe()
 
 
+async def check_incoming_calls(hass: HomeAssistant, fixture: CloudFixture) -> None:
+    """Exercise the packaged event through CURVE without transmitting a response."""
+    states = hass.states.async_all("event")
+    assert len(states) == 1
+    entity_id = states[0].entity_id
+    assert states[0].state == "unknown"
+    assert states[0].attributes["device_class"] == "doorbell"
+    assert states[0].attributes["event_types"] == ["ring"]
+    received = asyncio.Event()
+    rings: list[str] = []
+
+    @callback
+    def receive(change: Any) -> None:
+        if change.data.get("entity_id") != entity_id:
+            return
+        state = hass.states.get(entity_id)
+        if state is not None and state.attributes.get("event_type") == "ring":
+            rings.append(state.state)
+            received.set()
+
+    unsubscribe = hass.bus.async_listen("state_changed", receive)
+    try:
+        await hass.async_block_till_done()
+        sent_before = len(fixture.packets)
+        await fixture.incoming_call("fixture-private-call-token")
+        async with asyncio.timeout(5):
+            await received.wait()
+        await hass.async_block_till_done()
+        assert len(rings) == 1
+        state = hass.states.get(entity_id)
+        assert state is not None
+        assert state.attributes["board_id"] == BOARD
+        assert state.attributes["board_name"] == "Front entrance"
+        assert state.attributes["site_id"] == "fixture-site"
+        assert state.attributes["site_name"] == "Home"
+        for secret in ("fixture-private-call-token", "fixture-private-media-secret"):
+            assert secret not in repr(state.as_dict())
+        assert fixture.count("sp_brd_open_door") == 0
+        assert len(fixture.packets) == sent_before
+        await fixture.incoming_call("fixture-private-call-token")
+        await asyncio.sleep(0.05)
+        await hass.async_block_till_done()
+        assert len(rings) == 1
+        received.clear()
+        await fixture.incoming_call("fixture-private-next-token", "unknown-board")
+        async with asyncio.timeout(5):
+            await received.wait()
+        await hass.async_block_till_done()
+        assert len(rings) == 2 and rings[0] != rings[1]
+        state = hass.states.get(entity_id)
+        assert state is not None
+        assert not any(
+            key in state.attributes
+            for key in ("board_id", "board_name", "site_id", "site_name")
+        )
+        await fixture.incoming_call("fixture-private-call-token")
+        await asyncio.sleep(0.05)
+        await hass.async_block_till_done()
+        assert len(rings) == 2
+        assert len(fixture.packets) == sent_before
+        assert fixture.count("sp_brd_open_door") == 0
+    finally:
+        unsubscribe()
+
+
 async def check(
     archive: Path, config_dir: Path, registration: str, *, phase: str = "normal"
 ) -> None:
@@ -338,6 +421,9 @@ async def check(
             assert states[0].entity_id == saved["entity_id"]
             assert record.unique_id == saved["unique_id"]
             assert entry.data["session"] == saved["session"]
+            events = hass.states.async_all("event")
+            assert len(events) == 1 and events[0].state == "unknown"
+            await check_incoming_calls(hass, fixture)
             assert fixture.count("sp_srv_check_auth") == 0
             assert fixture.count("sp_srv_check_username") == 0
             assert fixture.count("sp_srv_override_username") == 0
@@ -350,6 +436,8 @@ async def check(
                         "same_credentials": True,
                         "same_entity_ids": True,
                         "no_sms_or_actuation": True,
+                        "new_doorbell_event": True,
+                        "passive_incoming_call": True,
                     }
                 )
             )
@@ -449,6 +537,7 @@ async def check(
             assert fixture.count("sp_brd_open_door") == 0
             print(json.dumps({"baseline_state_saved": True, "no_actuation": True}))
             return
+        await check_incoming_calls(hass, fixture)
         await hass.services.async_call(
             "button", "press", {"entity_id": entity_id}, blocking=True
         )
@@ -485,6 +574,8 @@ async def check(
                     "invalid_code_retry": True,
                     "saved_session_setup": True,
                     "eligible_buttons": len(buttons),
+                    "passive_incoming_call": True,
+                    "duplicate_call_suppression": True,
                     "release_acknowledged": True,
                     "no_release_replay": True,
                     "permission_push": True,

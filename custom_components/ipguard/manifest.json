@@ -8,6 +8,6 @@
   "issue_tracker": "https://github.com/KennyTangHK/hass-ipguard/issues",
   "iot_class": "cloud_push",
   "loggers": ["ipguard_api"],
-  "requirements": ["ipguard-api==0.1.0b2"],
-  "version": "0.1.0b2"
+  "requirements": ["ipguard-api==0.1.0b3"],
+  "version": "0.1.0b3"
 }

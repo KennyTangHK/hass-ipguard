@@ -1,6 +1,7 @@
 """Exercise the real SDK against plain and CURVE TCP servers on loopback only."""
 
 import asyncio
+import base64
 import json
 import logging
 import sys
@@ -18,6 +19,7 @@ from ipguard_api import (
     AuthRevokedError,
     ConnectionFailureError,
     ExistingInstallationError,
+    IncomingCall,
     InvalidCodeError,
     InvalidInputError,
     IpguardClient,
@@ -62,6 +64,8 @@ class FakeCloud:
         self.drop_auth = False
         self.revoke_startup = False
         self.registration = "normal"
+        self.startup_offer: dict | None = None
+        self.drop_inventory = False
         self.routes: set[bytes] = set()
         self.tasks = [
             asyncio.create_task(self.read(self.activation, "activation")),
@@ -170,10 +174,14 @@ class FakeCloud:
                                 b'{"action":"register","data":{"token":"opaque-control"}}',
                             ]
                         )
+                        if self.startup_offer is not None:
+                            await socket.send_multipart(
+                                [route, json.dumps(self.startup_offer).encode()]
+                            )
                         if data["username"]:
                             if self.revoke_startup:
                                 await self.send(socket, route, "srv_sp_delete")
-                            else:
+                            elif not self.drop_inventory:
                                 await self.send(
                                     socket, route, "bc_sp_relays", self.inventory()
                                 )
@@ -818,3 +826,471 @@ async def test_closed_transport_failure_before_attempt_remains_connectivity_erro
             await client.async_release("synthetic-board", 1)
         assert not client._release_locks
         assert "sp_brd_open_door" not in cloud.events()
+
+
+def offer_packet(
+    token="private-offer-token", remote="synthetic-board", sender="private-offer-sender"
+):
+    return envelope(
+        sender,
+        "ps_sp_sdp_offer",
+        {
+            "remoteIdentity": remote,
+            "sdp": base64.b64encode(
+                b"v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=private-media-description\r\n"
+                b"t=0 0\r\nm=audio 9 RTP/AVP 0\r\na=ice-pwd:private-ice-password\r\n"
+            ).decode(),
+        },
+        token,
+    )
+
+
+async def push_packet(cloud, packet, *, route=None, secure=True):
+    socket = cloud.secure if secure else cloud.activation
+    routes = cloud.routes if route is None else (route,)
+    for target in routes:
+        await socket.send_multipart([target, json.dumps(packet).encode()])
+
+
+async def inventory_barrier(client, cloud, body=None, *, secure=True):
+    """A trailing inventory push proves preceding offers reached the same reader."""
+    changed = asyncio.Event()
+    unsubscribe = client.subscribe(lambda _: changed.set())
+    try:
+        await push_packet(
+            cloud,
+            envelope("fixture-service", "bc_sp_relays", body or cloud.inventory()),
+            route=client._identity.encode(),
+            secure=secure,
+        )
+        await asyncio.wait_for(changed.wait(), 1)
+    finally:
+        unsubscribe()
+
+
+async def test_incoming_offers_publish_only_known_inventory_board_without_sends(
+    cloud, caplog
+):
+    caplog.set_level(logging.DEBUG, logger="ipguard_api")
+    async with cloud.client() as client:
+        calls = []
+        client.subscribe_calls(calls.append)
+        await client.async_connect(cloud.saved_session())
+        transport = client._transport
+        packet = offer_packet()
+        packet["body"].update(
+            {"caller": "private-raw-caller", "password": "private-extra-password"}
+        )
+        await push_packet(cloud, packet)
+        await push_packet(cloud, offer_packet("unknown-call", "private-unknown-caller"))
+        await inventory_barrier(client, cloud)
+        assert calls[0] == IncomingCall(
+            replace(client.snapshot.relays[0].board, device_id=None)
+        )
+        assert calls[1] == IncomingCall()
+        assert transport is client._transport and client.connected
+        assert not transport._pending
+        await inventory_barrier(
+            client,
+            cloud,
+            {
+                "boards": [
+                    {
+                        "identity": "known-without-relay",
+                        "name": "Call-only entrance",
+                        "password": "private-inventory-password",
+                    }
+                ]
+            },
+        )
+        assert client.snapshot.relays == ()
+        await push_packet(cloud, offer_packet("no-relay-call", "known-without-relay"))
+        await inventory_barrier(client, cloud)
+        assert calls[2].board.identity == "known-without-relay"
+        assert calls[2].board.name == "Call-only entrance"
+        public = repr(calls) + repr(client._call_tokens) + caplog.text
+        for secret in (
+            "private-offer-token",
+            "private-offer-sender",
+            "private-unknown-caller",
+            "private-media-description",
+            "private-ice-password",
+            "private-raw-caller",
+            "private-extra-password",
+            "private-inventory-password",
+            packet["body"]["sdp"],
+        ):
+            assert secret not in public
+        assert client.snapshot.error is None
+        assert cloud.events() == ["hello"]
+
+
+async def test_call_duplicate_cancellation_and_unsubscribe_emit_no_response(
+    cloud, caplog
+):
+    caplog.set_level(logging.DEBUG, logger="ipguard_api")
+    async with cloud.client() as client:
+        await client.async_connect(cloud.saved_session())
+        calls = []
+        unsubscribe = client.subscribe_calls(calls.append)
+
+        def failing_callback(_):
+            raise RuntimeError("private-callback-secret")
+
+        client.subscribe_calls(failing_callback)
+        await push_packet(cloud, offer_packet("call-a"))
+        await push_packet(cloud, offer_packet("call-b"))
+        await push_packet(cloud, offer_packet("call-a", "private-other-caller"))
+        for event in (
+            "ps_sp_hangup_call",
+            "brd_sp_hangup_call",
+            "ps_sp_ring_ack",
+            "brd_sp_call_log",
+        ):
+            await cloud.push(event, {"token": "call-a"})
+        await push_packet(cloud, offer_packet("call-a"))
+        await inventory_barrier(client, cloud)
+        assert len(calls) == 2
+        unsubscribe()
+        unsubscribe()
+        await push_packet(cloud, offer_packet("call-c"))
+        await inventory_barrier(client, cloud)
+        assert len(calls) == 2
+        client.subscribe_calls(calls.append)
+        await push_packet(cloud, offer_packet("call-c"))
+        await push_packet(cloud, offer_packet("call-d"))
+        await inventory_barrier(client, cloud)
+        assert len(calls) == 3
+        assert "private-callback-secret" not in caplog.text
+        assert client.connected and client.snapshot.error is None
+        assert cloud.events() == ["hello"]
+    assert not client._call_listeners and not client._call_tokens
+
+
+async def test_calls_use_unique_latest_inventory_identity_and_never_offer_sender(cloud):
+    async with cloud.client() as client:
+        await client.async_connect(cloud.saved_session())
+        calls = []
+        client.subscribe_calls(calls.append)
+        await push_packet(
+            cloud,
+            offer_packet("routing-is-not-caller", "unknown-board", "synthetic-board"),
+        )
+        await inventory_barrier(
+            client,
+            cloud,
+            {
+                "boards": [
+                    {"identity": "ambiguous-board", "name": "First entrance"},
+                    {"identity": "ambiguous-board", "name": "Second entrance"},
+                ]
+            },
+        )
+        await push_packet(cloud, offer_packet("ambiguous-token", "ambiguous-board"))
+        await inventory_barrier(client, cloud, {"boards": []})
+        await push_packet(cloud, offer_packet("removed-board-token", "synthetic-board"))
+        await inventory_barrier(client, cloud)
+        assert calls == [IncomingCall(), IncomingCall(), IncomingCall()]
+        assert client.connected and client.snapshot.error is None
+        assert cloud.events() == ["hello"]
+
+
+@pytest.mark.parametrize(
+    "location,key,value",
+    [
+        ("header", "sender", None),
+        ("header", "sender", True),
+        ("header", "sender", {}),
+        ("header", "sender", ""),
+        ("header", "sender", " " * 4),
+        ("header", "sender", "x" * 256),
+        ("header", "sender", "bad\0sender"),
+        ("header", "sender", "bad\ud800sender"),
+        ("body", "token", None),
+        ("body", "token", 1),
+        ("body", "token", []),
+        ("body", "token", ""),
+        ("body", "token", " " * 4),
+        ("body", "token", "x" * 1025),
+        ("body", "token", "bad\ud800token"),
+        ("body", "token", "bad\ntoken"),
+        ("body", "remoteIdentity", None),
+        ("body", "remoteIdentity", False),
+        ("body", "remoteIdentity", {}),
+        ("body", "remoteIdentity", ""),
+        ("body", "remoteIdentity", "é" * 128),
+        ("body", "remoteIdentity", "bad\0remote"),
+        ("body", "sdp", None),
+        ("body", "sdp", True),
+        ("body", "sdp", {}),
+        ("body", "sdp", ""),
+        ("body", "sdp", "%%%private-invalid-base64%%%"),
+        ("body", "sdp", "v=0\r\nprivate-raw-sdp"),
+        ("body", "sdp", "é"),
+        ("body", "sdp", "AA=="),
+        ("body", "sdp", "////"),
+        ("body", "sdp", base64.b64encode(b"private-non-sdp").decode()),
+        ("body", "sdp", "A" * (256 * 1024 + 1)),
+    ],
+)
+async def test_malformed_call_offers_leave_reader_connected(
+    cloud, caplog, location, key, value
+):
+    caplog.set_level(logging.DEBUG, logger="ipguard_api")
+    async with cloud.client() as client:
+        await client.async_connect(cloud.saved_session())
+        calls = []
+        client.subscribe_calls(calls.append)
+        packet = offer_packet("retryable-private-token")
+        packet[location][key] = value
+        await push_packet(cloud, packet)
+        await inventory_barrier(client, cloud)
+        assert not calls and not client._call_tokens
+        assert client.connected and client.snapshot.error is None
+        await push_packet(cloud, offer_packet("retryable-private-token"))
+        await inventory_barrier(client, cloud)
+        assert len(calls) == 1
+        assert "private" not in caplog.text
+        assert cloud.events() == ["hello"]
+
+
+async def test_incoming_calls_require_activated_current_secure_transport(cloud):
+    cloud.startup_offer = offer_packet("startup-token")
+    async with cloud.client() as client:
+        calls = []
+        client.subscribe_calls(calls.append)
+        await client.async_request_verification(
+            "user@example.invalid", "Personal phone"
+        )
+        activation = client._transport
+        await push_packet(
+            cloud,
+            offer_packet("activation-token"),
+            route=client._identity.encode(),
+            secure=False,
+        )
+        await inventory_barrier(client, cloud, secure=False)
+        assert not calls
+        await client.async_verify_code("012345")
+        await push_packet(
+            cloud,
+            offer_packet("pending-token"),
+            route=client._identity.encode(),
+            secure=False,
+        )
+        await inventory_barrier(client, cloud, secure=False)
+        assert not calls
+        session = await client.async_complete_registration()
+        assert not calls  # The secure greeting offer arrived during pending enrollment.
+        await push_packet(cloud, offer_packet("activated-token"))
+        await inventory_barrier(client, cloud)
+        assert len(calls) == 1
+        await activation.on_packet(offer_packet("stale-activation-token"))
+        assert len(calls) == 1
+        current = client._transport
+        await client.async_connect(session)
+        assert (
+            len(calls) == 2
+        )  # An activated startup offer is received before inventory.
+        assert calls[-1] == IncomingCall()
+        await current.on_packet(offer_packet("stale-secure-token"))
+        assert len(calls) == 2
+        revoked = asyncio.Event()
+        client.subscribe(lambda snapshot: revoked.set() if snapshot.revoked else None)
+        await cloud.push("srv_sp_delete")
+        await asyncio.wait_for(revoked.wait(), 1)
+        await client._transport.on_packet(offer_packet("revoked-token"))
+        assert len(calls) == 2 and client._reconnect_task is None
+        assert "sp_brd_open_door" not in cloud.events()
+        assert all(
+            event
+            in {
+                "hello",
+                "sp_srv_check_auth",
+                "sp_srv_validate_auth",
+                "sp_srv_ask_key",
+                "sp_srv_check_username",
+                "sp_srv_update_ack",
+            }
+            for event in cloud.events()
+        )
+
+
+async def test_call_cache_survives_reconnect_and_resets_for_new_identity_or_close(
+    cloud,
+):
+    client = cloud.client()
+    calls = []
+    client.subscribe_calls(calls.append)
+    session = cloud.saved_session()
+    await client.async_connect(session)
+    await push_packet(cloud, offer_packet("reconnect-token"))
+    await inventory_barrier(client, cloud)
+    assert len(calls) == 1
+    notices = []
+    restored = asyncio.Event()
+
+    def on_notice(snapshot):
+        notices.append(snapshot)
+        if snapshot.connected and any(not notice.connected for notice in notices):
+            restored.set()
+
+    client.subscribe(on_notice)
+    await cloud.restart_secure()
+    await asyncio.wait_for(restored.wait(), 2)
+    await push_packet(cloud, offer_packet("reconnect-token"))
+    await push_packet(cloud, offer_packet("second-token"))
+    await inventory_barrier(client, cloud)
+    assert len(calls) == 2
+    await client.async_connect(session)
+    await push_packet(cloud, offer_packet("reconnect-token"))
+    await inventory_barrier(client, cloud)
+    assert len(calls) == 2
+    await client.async_connect(replace(session, identity=str(uuid4())))
+    await push_packet(
+        cloud, offer_packet("reconnect-token"), route=client._identity.encode()
+    )
+    await inventory_barrier(client, cloud)
+    assert len(calls) == 3
+    previous = client._transport
+    await client.async_close()
+    assert not client._call_tokens and not client._call_listeners
+    await previous.on_packet(offer_packet("after-close-token"))
+    assert len(calls) == 3
+    client.subscribe_calls(calls.append)
+    await client.async_connect(session)
+    await push_packet(
+        cloud, offer_packet("reconnect-token"), route=client._identity.encode()
+    )
+    await inventory_barrier(client, cloud)
+    assert len(calls) == 4
+    await client.async_close()
+    assert set(cloud.events()) == {"hello"}
+
+
+async def test_call_cache_has_lru_and_idle_expiry_bounds(cloud, monkeypatch):
+    import ipguard_api.client as client_module
+
+    clock = [1000.0]
+    monkeypatch.setattr(client_module, "monotonic", lambda: clock[0])
+    async with cloud.client() as client:
+        await client.async_connect(cloud.saved_session())
+        calls = []
+        client.subscribe_calls(calls.append)
+        for index in range(client_module.MAX_RECENT_CALLS):
+            await push_packet(cloud, offer_packet(f"bounded-private-token-{index}"))
+        await inventory_barrier(client, cloud)
+        assert len(calls) == client_module.MAX_RECENT_CALLS
+        clock[0] += 1
+        await push_packet(cloud, offer_packet("bounded-private-token-0"))
+        await push_packet(cloud, offer_packet("additional-private-token"))
+        await inventory_barrier(client, cloud)
+        assert len(calls) == client_module.MAX_RECENT_CALLS + 1
+        assert len(client._call_tokens) == client_module.MAX_RECENT_CALLS
+        assert all(
+            isinstance(key, bytes) and len(key) == 32 for key in client._call_tokens
+        )
+        assert "private" not in repr(client._call_tokens)
+        await push_packet(cloud, offer_packet("bounded-private-token-0"))
+        await push_packet(cloud, offer_packet("bounded-private-token-1"))
+        await inventory_barrier(client, cloud)
+        assert len(calls) == client_module.MAX_RECENT_CALLS + 2
+        clock[0] += client_module.RECENT_CALL_TTL
+        await push_packet(cloud, offer_packet("bounded-private-token-0"))
+        await inventory_barrier(client, cloud)
+        assert len(calls) == client_module.MAX_RECENT_CALLS + 3
+        assert len(client._call_tokens) == 1
+        assert cloud.events() == ["hello"]
+
+
+async def test_connect_cancellation_clears_call_subscription_and_cache(cloud):
+    cloud.startup_offer = offer_packet("cancelled-startup-token")
+    cloud.drop_inventory = True
+    client = cloud.client()
+    calls = []
+    offered = asyncio.Event()
+
+    def on_call(call):
+        calls.append(call)
+        offered.set()
+
+    client.subscribe_calls(on_call)
+    session = cloud.saved_session()
+    operation = asyncio.create_task(client.async_connect(session))
+    await asyncio.wait_for(offered.wait(), 1)
+    transport = client._transport
+    assert calls == [IncomingCall()]
+    assert not client.connected
+    operation.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await operation
+    assert client._transport is None and transport.closed
+    assert not client._call_listeners and not client._call_tokens
+    assert not client._call_boards
+    await transport.on_packet(offer_packet("cancelled-late-token"))
+    assert len(calls) == 1
+    assert not [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name() in {"ipguard-reader", "ipguard-monitor", "ipguard-reconnect"}
+    ]
+    cloud.drop_inventory = False
+    client.subscribe_calls(on_call)
+    await client.async_connect(session)
+    assert len(calls) == 2
+    await client.async_close()
+    assert cloud.events() == ["hello", "hello"]
+
+
+async def test_readiness_failure_ignores_late_offers_until_fresh_transport(
+    cloud, monkeypatch
+):
+    async with cloud.client(timeout=0.1) as client:
+        await client.async_connect(cloud.saved_session())
+        calls = []
+        client.subscribe_calls(calls.append)
+        original = client._transport
+        new_transport = client._new_transport
+        generations = []
+        failed = asyncio.Event()
+        next_started = asyncio.Event()
+        resume = asyncio.Event()
+        restored = asyncio.Event()
+
+        async def pause_next_generation(*, secure):
+            if len(generations) == 1:
+                next_started.set()
+                await resume.wait()
+            transport = await new_transport(secure=secure)
+            generations.append(transport)
+            return transport
+
+        def on_notice(snapshot):
+            if snapshot.error is not None and client._transport is not original:
+                failed.set()
+            if snapshot.connected:
+                restored.set()
+
+        monkeypatch.setattr(client, "_new_transport", pause_next_generation)
+        client.subscribe(on_notice)
+        cloud.drop_inventory = True
+        await original.async_close()
+        client._on_failure(ConnectionFailureError("synthetic interruption"))
+        await asyncio.wait_for(failed.wait(), 1)
+        failed_transport = client._transport
+        assert failed_transport is generations[0] and not failed_transport.closed
+        await push_packet(cloud, offer_packet("failed-readiness-token"))
+        await inventory_barrier(client, cloud)
+        assert not calls and not client._call_tokens
+        await asyncio.wait_for(next_started.wait(), 1)
+        assert client.snapshot.error is not None
+        await failed_transport.on_packet(offer_packet("between-generations-token"))
+        assert not calls
+        cloud.startup_offer = offer_packet("fresh-startup-token")
+        cloud.drop_inventory = False
+        resume.set()
+        await asyncio.wait_for(restored.wait(), 1)
+        assert len(calls) == 1 and client.connected
+        await failed_transport.on_packet(offer_packet("stale-failed-token"))
+        assert len(calls) == 1
+        assert cloud.events() == ["hello", "hello", "hello"]

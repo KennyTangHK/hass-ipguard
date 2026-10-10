@@ -1,7 +1,5 @@
 # Protocol notes and verification limits
 
-The [Android metadata contract](ANDROID_METADATA.md) records the MQ fields and HTTP/User-Agent profile used for Android compatibility. The integration implements only direct MQ traffic.
-
 This independent beta project supports the IPGUARD Android app protocol (`com.noralsy.portaphone`). These notes describe message shapes and client behavior; continued compatibility with the vendor's live service requires field testing.
 
 The API library implements this sequence:
@@ -10,12 +8,11 @@ The API library implements this sequence:
 2. Validate the six-digit code using `sp_srv_validate_auth`, then obtain a server public key through `sp_srv_ask_key`.
 3. Connect to `tcp://zmq.campiserveur.com:5577` using fresh client CURVE keys and the returned server key. Send the initial secure greeting before `sp_srv_check_username`. Use `sp_srv_override_username` only after explicit replacement consent.
 4. Receive and acknowledge `srv_sp_update`, retain the activation credential at `data[1].sip_pwd`, and receive `bc_sp_relays` inventories. Reset notices during pending enrollment are ignored; an activated-installation reset requires reauthentication.
-5. Send `sp_brd_open_door` with a one-based relay number and board routing identity only when the current inventory permits remote release. Match `brd_sp_open_door_ack` by token and board sender. A missing acknowledgement is an unknown outcome and is never replayed automatically.
+5. Receive `ps_sp_sdp_offer` on the current activated secure connection. Validate the bounded token, remote identity, sender and Base64 SDP, suppress repeated token digests, and emit a sanitized incoming-call callback. No call acknowledgement, answer, pickup, hangup or media negotiation is sent.
+6. Send `sp_brd_open_door` with a one-based relay number and board routing identity only when the current inventory permits remote release. Match `brd_sp_open_door_ack` by token and board sender. A missing acknowledgement is an unknown outcome and is never replayed automatically.
 
 Direct enrollment uses ordinary TCP before the CURVE channel. It is not HTTPS or encrypted onboarding. Saved authorization includes identifiers, UUID, verification code, server key and activation credential; do not share serialized sessions or Home Assistant's private storage.
 
-Only remote-capable relay types are exposed. Bluetooth-only access and pending badge confirmation do not create usable cloud controls. No proven cloud physical door/lock-state event was established, so buttons do not report open/closed or locked/unlocked state. SIP/video are outside this library's implementation.
+Only remote-capable relay types are exposed. Bluetooth-only access and pending badge confirmation do not create usable cloud controls. No proven cloud physical door/lock-state event was established, so buttons do not report open/closed or locked/unlocked state. Firebase, call controls and SIP/video media are outside this library's implementation. Incoming notifications reuse the existing MQ connection.
 
-Server-facing human-readable metadata uses the app's values or the mock Android handset configured in [`AndroidProfile`](https://github.com/KennyTangHK/hass-ipguard/blob/master/ipguard-api/src/ipguard_api/models.py), including `Pixel 7`, `WiFi` and locale `en_GB`. That profile defines the Android OS and app versions. The separate user-entered installation label must be a personal name or Android device name. Home Assistant/project names are kept local; opaque identifiers, keys and tokens are preserved.
-
-Automated tests use synthetic accounts and loopback plaintext/CURVE servers. Disposable Home Assistant containers have external networking disabled. Live account acceptance, credential lifetime, account aliases, simultaneous mobile installations, and a supervised physical release remain field checks. This project is not affiliated with IPGUARD, NACD or Noralsy and does not claim vendor endorsement or Home Assistant Core approval.
+Automated tests use synthetic accounts and loopback plaintext/CURVE servers. Disposable Home Assistant containers have external networking disabled. Live account acceptance, credential lifetime, account aliases, simultaneous mobile installations, incoming call delivery without mobile push, and a supervised physical release remain field checks. This project is not affiliated with IPGUARD, NACD or Noralsy and does not claim vendor endorsement or Home Assistant Core approval.

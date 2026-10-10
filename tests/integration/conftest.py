@@ -50,4 +50,6 @@ def client(session: Session, relay: Relay) -> Mock:
     mock.async_close = AsyncMock()
     mock.unsubscribe = Mock()
     mock.subscribe = Mock(return_value=mock.unsubscribe)
+    mock.unsubscribe_calls = Mock()
+    mock.subscribe_calls = Mock(return_value=mock.unsubscribe_calls)
     return mock

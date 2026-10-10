@@ -3,7 +3,7 @@
 from homeassistant.const import Platform
 
 DOMAIN = "ipguard"
-PLATFORMS = [Platform.BUTTON]
+PLATFORMS = [Platform.BUTTON, Platform.EVENT]
 CONF_IDENTIFIER = "identifier"
 CONF_INSTALLATION_NAME = "installation_name"
 CONF_VERIFICATION_CODE = "verification_code"

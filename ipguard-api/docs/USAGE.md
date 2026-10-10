@@ -49,6 +49,34 @@ Normal startup calls `async_connect` without requesting a code or replacing an i
 
 `client.connected`, `client.session` and `client.snapshot` read cached values. Background recovery uses bounded exponential backoff and the saved session. Revocation stops reconnecting and requires user-driven enrollment. `async_close` closes sockets, cancels recovery and clears callbacks; repeated cleanup is supported.
 
+## Incoming calls
+
+Use `subscribe_calls` before connecting and keep the client open. It registers a synchronous event-loop callback and returns an unsubscribe function:
+
+```python
+from ipguard_api import IncomingCall, IpguardClient, Session
+
+
+async def listen(saved_data, stop):
+    def on_call(call: IncomingCall) -> None:
+        print(call.board.name if call.board else "Incoming intercom call")
+
+    session = Session.from_dict(saved_data)
+    async with IpguardClient(session=session) as client:
+        unsubscribe = client.subscribe_calls(on_call)
+        try:
+            await client.async_connect(session)
+            await stop.wait()
+        finally:
+            unsubscribe()
+```
+
+`IncomingCall` contains only an optional `Board` matched by exact identity against the latest cached inventory. Unknown or ambiguous callers still produce a callback with `board=None`. Optional board/site labels and the site identity are omitted if malformed, contain control characters or exceed 256 UTF-8 bytes. Call tokens, routing senders, SDP and media credentials are not exposed or retained in callback data. Offers must come from the current authenticated transport for an activated installation; malformed offers are ignored without interrupting relay updates.
+
+Callbacks may arrive before `async_connect` completes, including during reconnect. Callers should briefly buffer sanitized notifications if their own interface is not ready. The client neither acknowledges offers nor answers, picks up, hangs up or negotiates media. It does not use Firebase. Live server delivery with an empty mobile push token remains a field check.
+
+Deduplication stores at most 256 token digests. Repeated offers refresh a 15-minute idle expiry; the cache survives reconnects for the same installation and clears on explicit close or an installation change. No disconnected call history is fetched or replayed. Incoming payloads require bounded routing identities, an opaque token of at most 1,024 UTF-8 bytes and valid Base64 SDP of at most 256 KiB beginning with `v=0`.
+
 ## Release one relay
 
 Select a current `Relay` with `remote_allowed=True` and no pending confirmation. Call `await client.async_release(relay.board_identity, relay.number)` only for a deliberate user action. Relay numbers are one-based; the Android app supports 1–3.

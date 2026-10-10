@@ -1,7 +1,7 @@
 """Preserve wire shapes, eligibility and privacy boundaries from the app."""
 
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, fields, replace
 from datetime import timedelta
 from unittest.mock import Mock
 from uuid import uuid4
@@ -9,12 +9,16 @@ from uuid import uuid4
 import pytest
 from ipguard_api import (
     AndroidProfile,
+    Board,
+    IncomingCall,
     InvalidInputError,
     ProtocolError,
     Session,
     validate_identifier,
 )
 from ipguard_api.protocol import (
+    MAX_CALL_SDP_BYTES,
+    MAX_CALL_TOKEN_BYTES,
     MAX_INVENTORY_BOARDS,
     MAX_INVENTORY_SITES,
     MAX_MESSAGE_BYTES,
@@ -22,8 +26,10 @@ from ipguard_api.protocol import (
     assert_android_metadata,
     configuration_password,
     decode_frames,
+    door_inventory,
     envelope,
     hello,
+    incoming_call,
     relay_inventory,
 )
 
@@ -349,3 +355,185 @@ def test_inventory_reads_only_first_three_relay_permissions():
         {"boards": [{"identity": "board", "relay_access_mobile_v2": permissions}]}
     )
     assert len(result) == 3
+
+
+def test_incoming_call_model_contains_only_a_frozen_known_board():
+    board = Board("known-board", name="Entrance")
+    call = IncomingCall(board)
+    assert [field.name for field in fields(call)] == ["board"]
+    assert IncomingCall().board is None
+    with pytest.raises(FrozenInstanceError):
+        call.board = None
+
+
+def test_board_inventory_retains_boards_without_relay_permissions():
+    boards, relays = door_inventory(
+        {
+            "sites": {
+                "building": {
+                    "name": "Building",
+                    "boards": [
+                        {"identity": "board", "name": "Entrance", "secret": "private"}
+                    ],
+                }
+            }
+        }
+    )
+    assert relays == ()
+    assert boards == (
+        Board("board", name="Entrance", site_id="building", site_name="Building"),
+    )
+    assert "private" not in repr(boards)
+
+
+@pytest.mark.parametrize(
+    "location,key",
+    [
+        ("header", "sender"),
+        ("body", "token"),
+        ("body", "remoteIdentity"),
+        ("body", "sdp"),
+    ],
+)
+def test_missing_offer_fields_are_ignored(location, key):
+    packet = envelope(
+        "sender",
+        "ps_sp_sdp_offer",
+        {"remoteIdentity": "board", "sdp": "dj0wDQo="},
+        "token",
+    )
+    del packet[location][key]
+    assert incoming_call(packet, {}) is None
+
+
+def test_call_field_bounds_are_encoded_byte_limits_and_tokens_are_opaque():
+    import base64
+
+    board = Board("x" * 255)
+    packet = envelope(
+        "s" * 255,
+        "ps_sp_sdp_offer",
+        {
+            "remoteIdentity": board.identity,
+            "sdp": base64.b64encode(
+                b"v=0\r\n" + b"x" * (MAX_CALL_SDP_BYTES * 3 // 4 - 5)
+            ).decode(),
+        },
+        "é" * (MAX_CALL_TOKEN_BYTES // 2),
+    )
+    assert len(packet["body"]["sdp"]) == MAX_CALL_SDP_BYTES
+    parsed = incoming_call(packet, {board.identity: board})
+    assert parsed is not None and parsed[0] == IncomingCall(board)
+    assert len(parsed[1]) == 32
+    packet["body"]["token"] += "x"
+    assert incoming_call(packet, {}) is None
+    packet["body"]["token"] = "opaque_Node.js_CLI_token"
+    assert incoming_call(packet, {}) is not None
+    packet["header"]["event"] = "srv_sp_sdp_offer"
+    assert incoming_call(packet, {}) is None
+
+
+@pytest.mark.parametrize("field", ["name", "site_id", "site_name"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "",
+        " ",
+        "bad\0metadata",
+        "bad\tmetadata",
+        "bad\nmetadata",
+        "bad\x7fmetadata",
+        "bad\x85metadata",
+        "bad\u202emetadata",
+        "bad\ud800metadata",
+        "x" * 257,
+        "é" * 129,
+    ],
+)
+def test_call_projection_omits_invalid_optional_board_metadata(field, value):
+    original = replace(
+        Board("board", name="Entrance", site_id="building", site_name="Building"),
+        **{field: value},
+    )
+    packet = envelope(
+        "sender",
+        "ps_sp_sdp_offer",
+        {"remoteIdentity": "board", "sdp": "dj0wDQo="},
+        "token",
+    )
+    parsed = incoming_call(packet, {original.identity: original})
+    assert parsed is not None
+    board = parsed[0].board
+    assert board is not None and board.identity == original.identity
+    assert not getattr(board, field)
+    assert getattr(original, field) == value
+
+
+@pytest.mark.parametrize("field", ["name", "site_id", "site_name"])
+@pytest.mark.parametrize("value", ["x" * 256, "é" * 128, "😀" * 64, "Étage principal"])
+def test_call_projection_accepts_printable_optional_metadata_byte_boundaries(
+    field, value
+):
+    original = replace(
+        Board("board", name="Entrance", site_id="building", site_name="Building"),
+        **{field: value},
+    )
+    packet = envelope(
+        "sender",
+        "ps_sp_sdp_offer",
+        {"remoteIdentity": "board", "sdp": "dj0wDQo="},
+        "token",
+    )
+    parsed = incoming_call(packet, {original.identity: original})
+    assert parsed is not None and parsed[0].board == original
+
+
+def test_call_projection_preserves_original_release_inventory_metadata():
+    boards, relays = door_inventory(
+        {
+            "sites": {
+                "private\0site-id": {
+                    "name": "private\ud800site-name",
+                    "boards": [
+                        {
+                            "identity": "board",
+                            "name": "x" * 257,
+                            "relay_access_mobile_v2": [{"type": 0}],
+                        }
+                    ],
+                }
+            }
+        }
+    )
+    original = boards[0]
+    packet = envelope(
+        "sender",
+        "ps_sp_sdp_offer",
+        {"remoteIdentity": "board", "sdp": "dj0wDQo="},
+        "token",
+    )
+    parsed = incoming_call(packet, {original.identity: original})
+    assert parsed is not None
+    assert parsed[0].board == Board("board")
+    assert relays[0].board is original
+    assert original.name == "x" * 257
+    assert original.site_id == "private\0site-id"
+    assert original.site_name == "private\ud800site-name"
+
+
+def test_call_projection_omits_unused_device_metadata_without_changing_inventory():
+    original = Board(
+        "board", device_id="private\0device" * 1000, device_type="private\ud800type"
+    )
+    packet = envelope(
+        "sender",
+        "ps_sp_sdp_offer",
+        {"remoteIdentity": "board", "sdp": "dj0wDQo="},
+        "token",
+    )
+    parsed = incoming_call(packet, {original.identity: original})
+    assert parsed is not None and parsed[0].board == Board("board")
+    assert "private" not in repr(parsed[0])
+    assert original.device_id == "private\0device" * 1000
+    assert original.device_type == "private\ud800type"

@@ -1,17 +1,30 @@
 """Message shapes established by the IPGUARD 3.4.8 Android package."""
 
+import base64
+import hashlib
 import json
 import time
+from binascii import Error as Base64Error
 from collections.abc import Mapping
 from datetime import datetime
+from unicodedata import category
 from uuid import uuid4
 
 from .errors import InvalidInputError, ProtocolError
-from .models import AndroidProfile, AuthIdentifier, Board, Relay, Session, SessionStatus
+from .models import (
+    AndroidProfile,
+    AuthIdentifier,
+    Board,
+    IncomingCall,
+    Relay,
+    Session,
+    SessionStatus,
+)
 from .validation import (
     validate_identifier,
     validate_installation_label,
     validate_routing_identity,
+    validate_utf8,
     validate_verification_code,
 )
 
@@ -20,6 +33,9 @@ MAX_MESSAGE_BYTES = 8 * 1024 * 1024
 MAX_MESSAGE_FRAMES = 16
 MAX_INVENTORY_SITES = 256
 MAX_INVENTORY_BOARDS = 1024
+MAX_CALL_TOKEN_BYTES = 1024
+MAX_CALL_SDP_BYTES = 256 * 1024
+MAX_CALL_METADATA_BYTES = 256
 
 
 def envelope(
@@ -81,6 +97,80 @@ def packet_body(packet: Packet) -> dict[str, object]:
 def packet_sender(packet: Packet) -> object:
     header = packet.get("header")
     return header.get("sender") if isinstance(header, dict) else None
+
+
+def incoming_call(
+    packet: Packet, boards: Mapping[str, Board]
+) -> tuple[IncomingCall, bytes] | None:
+    """Validate an offer and discard signalling data after hashing its token.
+
+    Authentication and current-transport checks belong to the caller. The SDP
+    is bounded and checked as encoded text only; no media session is created.
+    Malformed offers are ignored without raising credential-bearing errors.
+    """
+    if packet_event(packet) != "ps_sp_sdp_offer":
+        return None
+    body = packet_body(packet)
+    sender, remote, token, sdp = (
+        packet_sender(packet),
+        body.get("remoteIdentity"),
+        body.get("token"),
+        body.get("sdp"),
+    )
+    if not all(isinstance(value, str) for value in (sender, remote, token, sdp)):
+        return None
+    assert isinstance(sender, str) and isinstance(remote, str)
+    assert isinstance(token, str) and isinstance(sdp, str)
+    try:
+        validate_routing_identity(sender)
+        validate_routing_identity(remote)
+        encoded_token = validate_utf8(
+            token, MAX_CALL_TOKEN_BYTES, "Invalid call token."
+        )
+        if (
+            not sender.strip()
+            or not remote.strip()
+            or not token.strip()
+            or any(
+                ord(char) < 32 for value in (sender, remote, token) for char in value
+            )
+            or not sdp
+            or len(sdp) > MAX_CALL_SDP_BYTES
+        ):
+            return None
+        description = base64.b64decode(sdp.encode("ascii"), validate=True).decode(
+            "utf-8"
+        )
+        if (
+            not description
+            or "\0" in description
+            or description.splitlines()[0] != "v=0"
+        ):
+            return None
+    except InvalidInputError, UnicodeError, Base64Error:
+        return None
+    board = boards.get(remote)
+    if board is not None:
+        # Only the call projection is sanitized; release inventory is unchanged.
+        board = Board(
+            identity=board.identity,
+            name=_call_metadata(board.name),
+            site_id=_call_metadata(board.site_id) or None,
+            site_name=_call_metadata(board.site_name) or None,
+        )
+    return IncomingCall(board), hashlib.sha256(encoded_token).digest()
+
+
+def _call_metadata(value: str | None) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    try:
+        validate_utf8(value, MAX_CALL_METADATA_BYTES, "Invalid call board metadata.")
+    except InvalidInputError:
+        return ""
+    if any(category(char) in {"Cc", "Cf"} for char in value):
+        return ""
+    return value
 
 
 def assert_android_metadata(packet: Packet) -> None:
@@ -245,6 +335,14 @@ def configuration_password(packet: Packet) -> str | None:
 
 
 def relay_inventory(body: Mapping[str, object]) -> tuple[Relay, ...]:
+    """Return relay permissions, preserving the existing discovery contract."""
+    return door_inventory(body)[1]
+
+
+def door_inventory(
+    body: Mapping[str, object],
+) -> tuple[tuple[Board, ...], tuple[Relay, ...]]:
+    """Read the inventory once, including boards with no release permissions."""
     source = _decoded(body.get("boards") if "boards" in body else body.get("sites"))
     if isinstance(source, list):
         sites: dict[str, object] = {"0": {"name": "", "boards": source}}
@@ -255,6 +353,7 @@ def relay_inventory(body: Mapping[str, object]) -> tuple[Relay, ...]:
             "Door inventory has no supported boards or sites structure."
         )
     relays: list[Relay] = []
+    boards: list[Board] = []
     seen: set[tuple[str, int]] = set()
     if len(sites) > MAX_INVENTORY_SITES:
         raise ProtocolError("Door inventory exceeds supported bounds.")
@@ -284,6 +383,7 @@ def relay_inventory(body: Mapping[str, object]) -> tuple[Relay, ...]:
                 device_id=_scalar(item.get("device_id")),
                 device_type=_scalar(item.get("device_type")),
             )
+            boards.append(board)
             access, names = item.get("relay_access_mobile_v2"), item.get("relay_name")
             if not isinstance(access, list):
                 continue
@@ -310,7 +410,7 @@ def relay_inventory(body: Mapping[str, object]) -> tuple[Relay, ...]:
                         access_mode=_scalar(permission.get("mode")),
                     )
                 )
-    return tuple(relays)
+    return tuple(boards), tuple(relays)
 
 
 def _name(value: object) -> str:

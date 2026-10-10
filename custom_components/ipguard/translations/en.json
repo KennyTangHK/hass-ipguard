@@ -63,6 +63,11 @@
       "release": {
         "name": "Release {relay}"
       }
+    },
+    "event": {
+      "incoming_call": {
+        "name": "{account} incoming call"
+      }
     }
   },
   "exceptions": {

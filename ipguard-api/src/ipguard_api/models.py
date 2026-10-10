@@ -140,6 +140,20 @@ class Board:
 
 
 @dataclass(frozen=True, slots=True)
+class IncomingCall:
+    """A notification containing only a uniquely mapped inventory board.
+
+    Unknown or ambiguous callers have ``board=None``. Call tokens, signalling
+    senders and media descriptions are never part of the public notification.
+    Optional board names and site fields are bounded, valid text without controls.
+    Unused device identifiers and device types are omitted from this projection.
+    This records receipt of an offer, not an active call or an answered call.
+    """
+
+    board: Board | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Relay:
     """A discovered relay and its permission to perform a release action.
 

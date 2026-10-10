@@ -58,7 +58,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: IpguardConfigEntry) -> b
     def receive(snapshot: ClientSnapshot) -> None:
         if runtime.closing:
             return
+        if snapshot.revoked or (
+            not snapshot.connected
+            and (runtime.coordinator.connected or snapshot.error is not None)
+        ):
+            runtime.pending_calls.clear()
         runtime.coordinator.receive(snapshot)
+        runtime.flush_calls()
         if snapshot.session is not None:
             persist_session(hass, entry, snapshot.session)
         if snapshot.revoked and not runtime.reauth_started:
@@ -66,6 +72,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: IpguardConfigEntry) -> b
             hass.async_create_task(reauthenticate(), "IPGUARD authorization cleanup")
 
     runtime.unsubscribe = client.subscribe(receive)
+    runtime.unsubscribe_calls = client.subscribe_calls(runtime.receive_call)
     try:
         await client.async_connect(session)
         relays = await client.async_get_relays()
