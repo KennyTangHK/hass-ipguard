@@ -14,21 +14,21 @@ from pathlib import Path
 from zipfile import ZipFile, ZipInfo
 
 import pytest
-import release_metadata
-from release_metadata import (
+
+from scripts import release_metadata
+from scripts.build_release import build_release
+from scripts.packaging_policy import load_policy
+from scripts.release_metadata import (
     ReleaseMetadata,
     checksum_text,
     read_metadata,
     validate_assets,
 )
 
-from scripts.build_release import build_release
-from scripts.packaging_policy import load_policy
-
 
 @pytest.fixture
 def release(tmp_path: Path) -> tuple[Path, Path, ReleaseMetadata]:
-    path = Path(__file__).parents[2] / "tests/test_release.py"
+    path = Path(__file__).parents[1] / "tests/test_release.py"
     spec = importlib.util.spec_from_file_location("packaging_fixtures", path)
     assert spec and spec.loader
     fixtures = importlib.util.module_from_spec(spec)
@@ -42,7 +42,7 @@ def release(tmp_path: Path) -> tuple[Path, Path, ReleaseMetadata]:
 
 
 def test_upgrade_baseline_matches_the_smoke_test_pin() -> None:
-    root = Path(__file__).parents[2]
+    root = Path(__file__).parents[1]
     source = ast.parse((root / "scripts/smoke_release.py").read_text())
     declarations = [
         statement.value
@@ -60,7 +60,7 @@ def test_upgrade_baseline_matches_the_smoke_test_pin() -> None:
 
 
 def test_upgrade_baseline_is_excluded_from_distributions_and_publication() -> None:
-    root = Path(__file__).parents[2]
+    root = Path(__file__).parents[1]
     policy = load_policy(root)
     baseline = ".github/fixtures/ipguard-upgrade-baseline.zip"
     for selection in (

@@ -17,7 +17,8 @@ from time import sleep, time
 from urllib.parse import quote
 from zipfile import BadZipFile
 
-from release_metadata import (
+from scripts.prepare_release import prepare_release
+from scripts.release_metadata import (
     ROOT,
     ReleaseMetadata,
     checksum_text,
@@ -25,7 +26,6 @@ from release_metadata import (
     release_notes,
     validate_assets,
 )
-from scripts.prepare_release import prepare_release
 
 type Runner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -171,6 +171,20 @@ class GitHub:
         accepted: tuple[int, ...] = (200,),
         missing_ok: bool = False,
     ) -> object:
+        if endpoint == "graphql" or endpoint.startswith("releases?"):
+            stage = "draft lookup"
+        elif endpoint.startswith("git/"):
+            stage = "tag verification"
+        elif endpoint.startswith("https://uploads.github.com/"):
+            stage = "asset upload"
+        elif method == "POST":
+            stage = "draft creation"
+        elif method == "PATCH":
+            stage = "publication"
+        elif method == "DELETE":
+            stage = "asset replacement"
+        else:
+            stage = "release lookup"
         url = (
             endpoint
             if endpoint == "graphql"
@@ -197,14 +211,14 @@ class GitHub:
             )
         except ValueError:
             raise GitHubApiError(
-                "GitHub API request could not complete; its result is unconfirmed.",
+                f"GitHub {stage} request could not complete; its result is unconfirmed.",
                 retryable=True,
             ) from None
         parts = re.split(r"\r?\n\r?\n", response.stdout, maxsplit=1)
         status = re.match(r"HTTP/[0-9.]+\s+([0-9]{3})\b", parts[0])
         if status is None:
             raise GitHubApiError(
-                "GitHub response has no valid HTTP status.",
+                f"GitHub {stage} response has no valid HTTP status.",
                 retryable=response.returncode != 0,
                 ambiguous=method != "GET",
             )
@@ -238,10 +252,11 @@ class GitHub:
                     )
             except ValueError, KeyError, OverflowError, TypeError:
                 raise GitHubApiError(
-                    "GitHub returned invalid retry metadata."
+                    f"GitHub {stage} returned invalid retry metadata (HTTP {code})."
                 ) from None
             raise GitHubApiError(
-                f"GitHub API request failed (HTTP {code}); publication stopped.",
+                f"GitHub API request failed during {stage} "
+                f"(HTTP {code}); publication stopped.",
                 status=code,
                 retryable=(
                     code >= 500
@@ -256,7 +271,7 @@ class GitHub:
             return None
         if len(parts) != 2:
             raise GitHubApiError(
-                "GitHub returned an incomplete API response.",
+                f"GitHub {stage} returned an incomplete API response (HTTP {code}).",
                 status=code,
                 ambiguous=method != "GET",
             )
@@ -264,7 +279,7 @@ class GitHub:
             return json.loads(parts[1])
         except ValueError:
             raise GitHubApiError(
-                "GitHub returned invalid JSON.",
+                f"GitHub {stage} returned invalid JSON (HTTP {code}).",
                 status=code,
                 ambiguous=method != "GET",
             ) from None
@@ -611,7 +626,7 @@ class GitHub:
                     "-F",
                     f"prerelease={str(metadata.prerelease).lower()}",
                     "-f",
-                    f"make_latest={str(metadata.latest).lower()}",
+                    f"make_latest={'legacy' if metadata.latest else 'false'}",
                     "-f",
                     f"name=IPGUARD {metadata.version}",
                     "-F",

@@ -2,7 +2,7 @@ name: Checks
 
 on:
   push:
-    branches: ["**"]
+    branches: [master]
   pull_request:
   workflow_call:
     inputs:
@@ -28,6 +28,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ inputs.expected-tag == '' }}
+
 jobs:
   hacs:
     name: HACS repository validation
@@ -45,7 +49,6 @@ jobs:
 
   checks:
     name: Validate, test, and build
-    needs: hacs
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
@@ -58,6 +61,15 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
+      - name: Validate GitHub Actions workflows
+        run: |
+          curl --fail --location --retry 3 \
+            --output "$RUNNER_TEMP/actionlint.tar.gz" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check
+          tar --extract --gzip --file "$RUNNER_TEMP/actionlint.tar.gz" \
+            --directory "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version-file: .python-version
@@ -76,7 +88,13 @@ jobs:
         id: metadata
         env:
           RELEASE_TAG: ${{ inputs.expected-tag }}
-        run: python .github/workflows/release_metadata.py --prepare --tag "$RELEASE_TAG" --github-output "$GITHUB_OUTPUT"
+          RELEASE_REF_TYPE: ${{ github.ref_type }}
+        run: |
+          args=(--prepare --tag "$RELEASE_TAG" --github-output "$GITHUB_OUTPUT")
+          if [[ -n "$RELEASE_TAG" ]]; then
+            args+=(--ref-type "$RELEASE_REF_TYPE")
+          fi
+          python -m scripts.release_metadata "${args[@]}"
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "0.12.24"
@@ -85,13 +103,11 @@ jobs:
       - run: uv run --no-sync ruff check .
       - run: uv run --no-sync ruff format --check .
       - run: uv run --no-sync mypy
-      - run: uv run --no-sync mypy .github/workflows/release_metadata.py .github/workflows/release_publish.py
       - run: uv run --no-sync pytest
-      - run: uv run --no-sync pytest .github/workflows/test_release_metadata.py .github/workflows/test_release_publish.py
       - run: uv build --all-packages --build-constraints build-constraints.txt --require-hashes
       - run: uv run --no-sync python scripts/build_release.py
       - name: Validate all release assets and generate checksums
-        run: python .github/workflows/release_metadata.py --dist dist --write-checksums
+        run: python -m scripts.release_metadata --dist dist --write-checksums
       - run: docker build -f scripts/Dockerfile.smoke -t ipguard-ha-smoke:2026.10.0 scripts
       - name: Test the portable release in Home Assistant
         env:
@@ -127,9 +143,11 @@ jobs:
             /checks/smoke_release.py /releases/ipguard.zip \
             --upgrade-from /baseline/ipguard.zip
       - name: Set the artifact name
+        if: inputs.expected-tag != ''
         id: artifact
         run: echo "name=ipguard-dist-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
       - name: Upload checked release assets
+        if: inputs.expected-tag != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ steps.artifact.outputs.name }}

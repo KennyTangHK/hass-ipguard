@@ -9,9 +9,10 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
-import release_publish
-from release_metadata import ReleaseMetadata
-from release_publish import (
+
+from scripts import release_publish
+from scripts.release_metadata import ReleaseMetadata
+from scripts.release_publish import (
     Asset,
     GitHub,
     expected_assets,
@@ -299,7 +300,7 @@ def test_publish_new_or_partial_draft_after_complete_verification(
     )
 
 
-def test_stable_publication_sets_stable_latest_flags(assets, tmp_path):
+def test_stable_publication_uses_github_latest_selection(assets, tmp_path):
     metadata = ReleaseMetadata("0.1.0", "0.1.0b2")
     stable_assets = {
         name: Asset(tmp_path / name, 10, "sha256:" + "0" * 64)
@@ -308,7 +309,7 @@ def test_stable_publication_sets_stable_latest_flags(assets, tmp_path):
     fake = FakeGh(stable_assets, tag="v0.1.0")
     publish_fake(fake, stable_assets, tmp_path, tag="v0.1.0", metadata=metadata)
     assert fields(writes(fake)[-1])["prerelease"] == "false"
-    assert fields(writes(fake)[-1])["make_latest"] == "true"
+    assert fields(writes(fake)[-1])["make_latest"] == "legacy"
 
 
 @pytest.mark.parametrize(
@@ -1193,6 +1194,35 @@ def test_nonretryable_get_failure_is_immediate_and_sanitized(code):
         GitHub(REPO, runner, sleeper=delays.append).get("test")
     assert len(calls) == 1 and not delays
     assert "secret" not in str(error.value) and "credential" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "request_method,path,stage",
+    [
+        ("GET", f"git/ref/tags/{TAG}", "tag verification"),
+        ("POST", "graphql", "draft lookup"),
+        ("POST", "releases", "draft creation"),
+        (
+            "POST",
+            f"https://uploads.github.com/repos/{REPO}/releases/42/assets?name=test.zip",
+            "asset upload",
+        ),
+        ("DELETE", "releases/assets/42", "asset replacement"),
+        ("PATCH", "releases/42", "publication"),
+    ],
+)
+def test_failure_identifies_operation_without_exposing_response(
+    request_method, path, stage
+):
+    def runner(arguments):
+        return response(403, {"message": "secret credential"})
+
+    with pytest.raises(ValueError) as error:
+        GitHub(REPO, runner).get(path, method=request_method)
+    message = str(error.value)
+    assert stage in message and "HTTP 403" in message
+    assert "secret" not in message and "credential" not in message
+    assert path not in message
 
 
 @pytest.mark.parametrize("failure", [429, 503, "network"])

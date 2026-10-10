@@ -14,12 +14,8 @@ from email.parser import BytesParser
 from pathlib import Path
 from zipfile import BadZipFile, ZipFile
 
-ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from scripts.build_release import VENDOR_INIT  # noqa: E402
-from scripts.packaging_policy import (  # noqa: E402
+from scripts.build_release import VENDOR_INIT
+from scripts.packaging_policy import (
     load_policy,
     portable_readme,
     source_bytes,
@@ -28,7 +24,9 @@ from scripts.packaging_policy import (  # noqa: E402
     validate_wheel_payload,
     zip_contents,
 )
-from scripts.prepare_release import prepare_release  # noqa: E402
+from scripts.prepare_release import prepare_release
+
+ROOT = Path(__file__).resolve().parents[1]
 
 VERSION = re.compile(
     r"[0-9]+\.[0-9]+\.[0-9]+(?:(?:a|b|rc)[0-9]+)?"
@@ -107,7 +105,8 @@ def read_metadata(root: Path, tag: str = "") -> ReleaseMetadata:
         if tag != f"v{version}":
             raise ValueError(
                 f"Release tag {tag} does not match integration version {version}; "
-                f"expected v{version}. Run release_metadata.py --prepare --tag {tag} "
+                f"expected v{version}. Run python -m scripts.release_metadata "
+                f"--prepare --tag {tag} "
                 "to generate metadata from this tag before validating."
             )
     return ReleaseMetadata(version, sdk_version)
