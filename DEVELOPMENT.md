@@ -1,0 +1,138 @@
+# Development
+
+The repository contains two independently packaged libraries: `ha-ipguard` at the root, with the HACS-required `custom_components/ipguard` layout, and `ipguard-api` in its own child project. Each has its own package metadata, anonymous Apache-2.0 license and wheel/source distribution. `uv` shares development dependencies; no separate runtime service is required.
+
+## Environment
+
+Use the interpreter selected by [`.python-version`](.python-version). Runtime requirements and development dependencies are declared in [`pyproject.toml`](pyproject.toml) and [`uv.lock`](uv.lock); the CI tool version is set in the [checks workflow](.github/workflows/checks.yml). The virtual environment also contains Home Assistant's own pinned `uv` dependency; do not independently upgrade that package.
+
+Run from the repository root:
+
+```sh
+uv sync --locked --all-packages
+uv run --no-sync python --version
+uv run --no-sync ruff check .
+uv run --no-sync ruff format --check .
+uv run --no-sync mypy
+uv run --no-sync pytest
+```
+
+`.venv` and `.cache/uv` are local and ignored. Both source packages are editable workspace dependencies. Do not install into a real Home Assistant instance to run these checks. SDK transport tests use plaintext/CURVE loopback servers; Home Assistant tests use isolated fixtures and synthetic accounts. No test may contact the provider, send a real SMS, replace an installation or release a physical door.
+
+The root `conftest.py` is pytest configuration shared by both test directories. Its automatic fixture patches native ZeroMQ connection and binding methods to allow only loopback or in-process endpoints. Pytest's ordinary Python socket guard cannot intercept libzmq, so this additional guard is required to prevent tests from contacting the provider. It is development-only and excluded from wheels, source distributions and release ZIPs.
+
+## Architecture and invariants
+
+The SDK owns identifier validation, challenge state, registration, Android metadata guards, ZeroMQ sockets, response correlation, pushed relay inventories, connection recovery and typed failures. It must preserve the pending-enrollment reset-notice fix and tolerate unrelated SIP/control envelopes. The integration owns explicit setup/consent forms, config entries, runtime subscriptions, board devices and buttons. Entity getters use cached data.
+
+One-based relay numbers are stable within a board. Buttons are release actions, without a lock state or contact sensor. A release must have current remote permission, must not wait in a queue for connectivity, and must never be replayed automatically. A timeout after possible delivery is an unknown result. Shutdown and cancelled setup flows must close sockets and stop background tasks.
+
+All human-readable server metadata must be values from the Android app or the agreed mock Android profile. Personal installation names are validated before transmission. Do not apply substring filters to identifiers, codes, keys, UUIDs or opaque correlation tokens. Logs must omit raw packets, serialized sessions, identifiers, passwords and arbitrary server-supplied error text.
+
+The independent SDK is imported only through the integration's `api.py` adapter. Keep imports inside the SDK relative: the custom release places a generated copy under `_vendor/ipguard_api`. This preserves exception/type identity and avoids changing `sys.path` or registering aliases in `sys.modules`.
+
+## Build an installable release
+
+```sh
+uv build --all-packages --build-constraints build-constraints.txt --require-hashes
+uv run --no-sync python scripts/build_release.py
+```
+
+The builder reads the integration and SDK versions from their package metadata and produces two archives with checksums: `dist/ipguard.zip` contains flat integration files for HACS, and `dist/ipguard-<version>.zip` contains `custom_components/ipguard` for manual extraction into a configuration directory. It checks the independent SDK wheel's name/version, includes its Apache-2.0 license, changes only the generated adapter to relative SDK imports, and sets the generated manifest's native requirement to the reviewed PyZMQ pin in [`scripts/build_release.py`](scripts/build_release.py). `release.json` records the SDK version and wheel digest. Identical inputs produce identical ZIP contents; generated files are not maintained by hand.
+
+The source manifest pins the SDK version declared by the independent package for a future PyPI publication. Install the bundled GitHub release through HACS, or use the manual archive. `hide_default_branch` prevents HACS from offering the source checkout without its built SDK. Native PyZMQ is installed by Home Assistant; no macOS binary is included in either archive. Before changing SDK dependencies, update the builder's dependency validation and release checks.
+
+The checks workflow runs lint, formatting, strict typing, tests, builds, HACS validation and the isolated container release check. It is also called by the release workflow before publication. Only the publishing job receives `contents: write`; normal changes and pull requests receive read-only permissions. Core submission still requires publishing the independent SDK and meeting upstream rules; bundled custom packaging does not imply Core approval.
+
+## Publish a beta or stable release
+
+Release versions follow PEP 440 and Home Assistant/HACS's AwesomeVersion. Tags have the form `v<major>.<minor>.<patch>b<serial>` for betas and `v<major>.<minor>.<patch>` for stable releases. Beta tags produce GitHub prereleases and require beta selection in HACS. Matching stable tags produce normal releases without the beta requirement.
+
+| Channel | Integration version | Matching tag | GitHub result |
+| --- | --- | --- | --- |
+| Beta | `<major>.<minor>.<patch>b<serial>` | `v<major>.<minor>.<patch>b<serial>` | Prerelease; excluded from Latest |
+| Stable | `<major>.<minor>.<patch>` | `v<major>.<minor>.<patch>` | Normal release; marked Latest |
+
+1. Set the integration version in [`pyproject.toml`](pyproject.toml) and [`custom_components/ipguard/manifest.json`](custom_components/ipguard/manifest.json) to the desired beta or stable form.
+2. If the SDK changed, update its own [`pyproject.toml`](ipguard-api/pyproject.toml), the root SDK dependency and the source manifest's SDK requirement together. The SDK may otherwise retain its independent version.
+3. Run `uv lock` and the local checks/build commands above. Review, commit and push the changes to the default branch.
+4. Create and push the matching tag. The **Publish release** workflow runs all checks, builds and publishes the assets automatically:
+
+```sh
+release_version="$(uv run --no-sync python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+git push origin master
+git tag "v$release_version"
+git push origin "v$release_version"
+```
+
+For a stable release, remove the beta suffix from the integration version before creating its new tag. When promoting the project out of beta, also remove beta-only labels from the README and HACS display name, and review the SDK's status separately. Create a new stable tag rather than changing the prerelease flag on a published beta.
+
+The workflow checks tag/package/manifest versions, independent SDK requirements, and the exact tested commit. It discovers existing drafts through authenticated release-list pagination, requiring one exact tag match, then creates or resumes a draft only when its assets contain no unexpected names. After upload it checks all nine asset names, uploaded states, byte sizes and SHA-256 digests, then rechecks the remote tag before publishing with the metadata-derived beta/stable flags. Errors leave the draft unpublished; unexpected assets are never deleted automatically and published releases are never overwritten. No manual ZIP upload, personal access token, or PyPI publishing step is required. [GitHub release-list API](https://docs.github.com/en/rest/releases/releases#list-releases)
+
+### Retry a failed publication
+
+Open **Actions → Publish release → the failed tagged run → Re-run all jobs**. The existing tag must still point to the tested commit. A valid partial draft is resumed; a published release is refused.
+
+Rerunning uses the original tagged commit, including its workflow files. If the fix changes code or workflows, commit and push the fix, then publish a new beta tag or recreate the failed tag only if it has never been published. Moving a published tag is not supported.
+
+The workflow also supports a manual dispatch against an existing tag:
+
+```sh
+release_tag="<existing-release-tag>"
+gh workflow run release.yml --repo KennyTangHK/hass-ipguard --ref "$release_tag"
+gh run watch --repo KennyTangHK/hass-ipguard
+```
+
+Run against the tag, since dispatching from a branch is rejected. Manual dispatch requires the workflow to be present on the default branch and in the selected tagged revision; older tagged runs can use **Re-run all jobs**. [GitHub manual workflow runs](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow), [GitHub CLI workflow reference](https://cli.github.com/manual/gh_workflow_run)
+
+### Delete a published release
+
+On GitHub, open **Releases**, select the release's delete button, then **Delete this release**. From the terminal, select and inspect the exact tag before deleting its release:
+
+```sh
+release_tag="<published-tag>"
+gh release view "$release_tag" --repo KennyTangHK/hass-ipguard
+gh release delete "$release_tag" --repo KennyTangHK/hass-ipguard
+```
+
+The command asks for confirmation and retains the Git tag. To delete the release and its remote tag together, use this command instead:
+
+```sh
+gh release delete "$release_tag" --repo KennyTangHK/hass-ipguard --cleanup-tag
+```
+
+The local tag remains until explicitly removed with `git tag -d "$release_tag"`. Deleting a release removes its downloadable assets; it does not uninstall users' existing copies or revert repository commits. Prefer a new version when shipping a correction. [GitHub release management](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository), [GitHub CLI deletion reference](https://cli.github.com/manual/gh_release_delete)
+
+Upgrade testing uses the [checked-in baseline fixture](.github/fixtures/README.md), so deleting old releases and tags does not remove the test input. Keep that fixture and its matching SHA-256 in [`scripts/smoke_release.py`](scripts/smoke_release.py) together when changing the baseline.
+
+For the next version, update the integration package and manifest. Change the SDK version and dependency when releasing SDK changes. Update documentation when behavior or installation steps change; versions and requirements remain in their authoritative metadata files. Run `uv lock`, checks and constrained builds, commit, then push a matching beta or stable tag. Mismatched tags and unsupported version formats fail before publication. Do not move an existing release tag; fix failed workflows and rerun the same tag's workflow, or publish a new version as appropriate.
+
+The integration is listed in the HACS catalogue as `KennyTangHK/hass-ipguard`. Keep the repository public with its description/topics and release assets maintained. Catalogue inclusion is separate from Home Assistant Core approval. The HACS validator reads the exact pushed GitHub revision, so it cannot fully validate unpushed local changes. [HACS publisher guide](https://www.hacs.dev/docs/publish/)
+
+To repeat the Linux release check with Docker:
+
+```sh
+docker build -f scripts/Dockerfile.smoke -t ipguard-ha-smoke scripts
+docker run --rm --network none \
+  -v "$PWD/dist:/releases:ro" -v "$PWD/scripts:/checks:ro" \
+  --entrypoint python ipguard-ha-smoke \
+  /checks/smoke_release.py /releases/ipguard.zip
+```
+
+The image uses the official Home Assistant digest pinned in [`scripts/Dockerfile.smoke`](scripts/Dockerfile.smoke) and installs the native PyZMQ requirement. The check extracts only the ZIP into temporary storage, blocks external SDK imports, starts Home Assistant in that temporary directory, and exercises real SDK enrollment and release against loopback plaintext/CURVE routers. The runtime has no external network and mounts no credentials or real configuration directory. All temporary containers are removed. Repeat the command with `--registration replace` and `--registration decline` after the ZIP argument to check both explicit replacement choices.
+
+## Evidence and verification limits
+
+Runtime hardening validates transmission-time permissions, rejects busy release writes, bounds malformed inputs/resources and suppresses credential-bearing exception chains. Source distributions, wheels and ZIPs use reviewed exact file selections; unknown source files and altered archive payloads fail validation. The copied SDK file set and bytes must equal its independent wheel, including the license. Both build backends and the complete isolated build dependency closure are pinned with hashes checked against `uv.lock`.
+
+The CI upgrade/restart scenario copies the [frozen baseline fixture](.github/fixtures/README.md) from the tested checkout and verifies its SHA-256 against [`scripts/smoke_release.py`](scripts/smoke_release.py) before executing its synthetic test phase. It requires no old GitHub release or tag. Separate processes install the baseline and current archive into temporary storage, preserving config-entry data, installation UUID and entity IDs. The restarted version requests no verification code, replacement or release action. `scripts/smoke_release.py --upgrade-from <baseline ZIP>` repeats this check; both versions communicate only with loopback fixtures.
+
+[Android metadata](docs/ANDROID_METADATA.md) records the application message fields and Android HTTP profile. The SDK currently has no provider HTTP transport and does not send an HTTP User-Agent. Android-compatible MQ fixtures and real peer metadata tests verify the supported mock handset fields and DEALER identity. This does not claim an identical TLS or transport fingerprint.
+
+Checks cover SDK, integration, packaging, release metadata and publication behavior. Run Ruff lint/format, strict mypy, the complete pytest suite and actionlint before releasing. Regressions cover failure/cancellation cleanup, pre-send authorization changes, complete credential-safe tracebacks and form responses, contaminated sources, archive tampering, SDK byte mismatches, partial drafts, moved tags and beta/stable releases. Publication tests use fake GitHub responses.
+
+Disposable Home Assistant container checks cover both ZIP layouts, normal enrollment, approved replacement, declined replacement, rejected-code retry, saved-session setup, eligible button creation, correlated release acknowledgement, no replay after acknowledgement loss, pushed permission removal and unload. Upgrade/restart checks preserve config-entry credentials, installation UUIDs and entity IDs without reenrollment or actuation. These scenarios use synthetic loopback accounts, no external network and temporary config directories. Native PyZMQ CURVE has been validated on macOS arm64 and Linux arm64. Generated archives must pass hash-constrained builds and exact source/archive/SDK byte validation.
+
+Protocol implementation follows the Android message contract configured by the SDK. Refer to [protocol notes](docs/PROTOCOL.md) for supported behavior and unknowns. Local fixtures prove message sequencing, transport and adapter behavior against those fixtures. They cannot prove continued vendor compatibility or a physical release at the user's building. Account-specific live enrollment and a supervised physical release remain field checks.
+
+Direct enrollment is plaintext TCP before the CURVE channel. Do not describe that stage as HTTPS or invent a secure fallback. Future stable/Core publication needs an explicit review of this observed onboarding protocol, code expiry, account aliases and simultaneous installation behavior.

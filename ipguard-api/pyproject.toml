@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ipguard-api"
+version = "0.1.0b2"
+description = "Typed asynchronous client for the IPGUARD cloud service"
+readme = "README.md"
+requires-python = ">=3.14.2,<3.15"
+license = "Apache-2.0"
+dependencies = ["pyzmq>=27.2.0,<28"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
+]
+
+[tool.hatch.build.targets.wheel]
+only-include = [
+    "src/ipguard_api/__init__.py",
+    "src/ipguard_api/client.py",
+    "src/ipguard_api/errors.py",
+    "src/ipguard_api/models.py",
+    "src/ipguard_api/protocol.py",
+    "src/ipguard_api/py.typed",
+    "src/ipguard_api/transport.py",
+    "src/ipguard_api/validation.py",
+]
+sources = ["src"]
+
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "src/ipguard_api/__init__.py",
+    "src/ipguard_api/client.py",
+    "src/ipguard_api/errors.py",
+    "src/ipguard_api/models.py",
+    "src/ipguard_api/protocol.py",
+    "src/ipguard_api/py.typed",
+    "src/ipguard_api/transport.py",
+    "src/ipguard_api/validation.py",
+    "tests/test_cloud.py",
+    "tests/test_contract.py",
+    "tests/test_protocol.py",
+    "docs/USAGE.md",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]

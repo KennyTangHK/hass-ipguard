@@ -1,0 +1,7 @@
+{
+  "name": "IPGUARD (Beta)",
+  "homeassistant": "2026.10.0",
+  "zip_release": true,
+  "filename": "ipguard.zip",
+  "hide_default_branch": true
+}

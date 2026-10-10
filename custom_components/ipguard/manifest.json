@@ -1,0 +1,13 @@
+{
+  "domain": "ipguard",
+  "name": "IPGUARD",
+  "codeowners": ["@KennyTangHK"],
+  "config_flow": true,
+  "integration_type": "hub",
+  "documentation": "https://github.com/KennyTangHK/hass-ipguard/blob/master/docs/USAGE.md",
+  "issue_tracker": "https://github.com/KennyTangHK/hass-ipguard/issues",
+  "iot_class": "cloud_push",
+  "loggers": ["ipguard_api"],
+  "requirements": ["ipguard-api==0.1.0b2"],
+  "version": "0.1.0b2"
+}

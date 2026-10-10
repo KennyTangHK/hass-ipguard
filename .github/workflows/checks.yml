@@ -1,0 +1,147 @@
+name: Checks
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_call:
+    inputs:
+      expected-tag:
+        description: Release tag to validate before building release assets.
+        required: false
+        default: ""
+        type: string
+    outputs:
+      version:
+        description: Validated integration version.
+        value: ${{ jobs.checks.outputs.version }}
+      sdk-version:
+        description: Validated independent SDK version.
+        value: ${{ jobs.checks.outputs.sdk-version }}
+      artifact-name:
+        description: Fresh, validated release files from this workflow run.
+        value: ${{ jobs.checks.outputs.artifact-name }}
+      tested-commit:
+        description: Commit checked out, tested, and used to build these assets.
+        value: ${{ jobs.checks.outputs.tested-commit }}
+
+permissions:
+  contents: read
+
+jobs:
+  hacs:
+    name: HACS repository validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Validate the current repository with HACS
+        uses: docker://ghcr.io/hacs/action@sha256:dc92fdad2f6ffbe74bffb7269d781ea8e064f52d9bb486cdf3925d74e7ab6ebf
+        env:
+          INPUT_CATEGORY: integration
+          INPUT_GITHUB_TOKEN: ${{ github.token }}
+          INPUT_COMMENT: "false"
+          INPUT_IGNORE: ""
+          REPOSITORY_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+
+  checks:
+    name: Validate, test, and build
+    needs: hacs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      sdk-version: ${{ steps.metadata.outputs.sdk_version }}
+      artifact-name: ${{ steps.artifact.outputs.name }}
+      tested-commit: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: .python-version
+      - name: Bind the checked checkout to the triggering commit
+        id: commit
+        env:
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          checkout_sha="$(git rev-parse HEAD)"
+          if [[ "$checkout_sha" != "$EVENT_SHA" ]]; then
+            echo "::error::Checkout does not match the triggering commit."
+            exit 1
+          fi
+          echo "sha=$checkout_sha" >> "$GITHUB_OUTPUT"
+      - name: Validate project and release metadata
+        id: metadata
+        env:
+          RELEASE_TAG: ${{ inputs.expected-tag }}
+        run: python .github/workflows/release_metadata.py --tag "$RELEASE_TAG" --github-output "$GITHUB_OUTPUT"
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.24"
+          enable-cache: true
+      - run: uv sync --locked --all-packages
+      - run: uv run --no-sync ruff check .
+      - run: uv run --no-sync ruff format --check .
+      - run: uv run --no-sync mypy
+      - run: uv run --no-sync mypy .github/workflows/release_metadata.py .github/workflows/release_publish.py
+      - run: uv run --no-sync pytest
+      - run: uv run --no-sync pytest .github/workflows/test_release_metadata.py .github/workflows/test_release_publish.py
+      - run: uv build --all-packages --build-constraints build-constraints.txt --require-hashes
+      - run: uv run --no-sync python scripts/build_release.py
+      - name: Validate all release assets and generate checksums
+        run: python .github/workflows/release_metadata.py --dist dist --write-checksums
+      - run: docker build -f scripts/Dockerfile.smoke -t ipguard-ha-smoke:2026.10.0 scripts
+      - name: Test the portable release in Home Assistant
+        env:
+          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          for registration in normal replace decline; do
+            docker run --rm --network none \
+              -v "$GITHUB_WORKSPACE/dist:/releases:ro" \
+              -v "$GITHUB_WORKSPACE/scripts:/checks:ro" \
+              --entrypoint python ipguard-ha-smoke:2026.10.0 \
+              /checks/smoke_release.py "/releases/ipguard-$RELEASE_VERSION.zip" \
+              --registration "$registration"
+          done
+      - name: Test the HACS archive in Home Assistant
+        run: |
+          docker run --rm --network none \
+            -v "$GITHUB_WORKSPACE/dist:/releases:ro" \
+            -v "$GITHUB_WORKSPACE/scripts:/checks:ro" \
+            --entrypoint python ipguard-ha-smoke:2026.10.0 \
+            /checks/smoke_release.py /releases/ipguard.zip
+      - name: Prepare the pinned upgrade baseline
+        run: |
+          mkdir -p "$RUNNER_TEMP/ipguard-upgrade-baseline"
+          cp .github/fixtures/ipguard-upgrade-baseline.zip \
+            "$RUNNER_TEMP/ipguard-upgrade-baseline/ipguard.zip"
+      - name: Test release upgrade and restart without reenrollment
+        run: |
+          docker run --rm --network none \
+            -v "$GITHUB_WORKSPACE/dist:/releases:ro" \
+            -v "$GITHUB_WORKSPACE/scripts:/checks:ro" \
+            -v "$RUNNER_TEMP/ipguard-upgrade-baseline:/baseline:ro" \
+            --entrypoint python ipguard-ha-smoke:2026.10.0 \
+            /checks/smoke_release.py /releases/ipguard.zip \
+            --upgrade-from /baseline/ipguard.zip
+      - name: Set the artifact name
+        id: artifact
+        run: echo "name=ipguard-dist-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+      - name: Upload checked release assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: |
+            dist/ipguard.zip
+            dist/ipguard.zip.sha256
+            dist/ipguard-${{ steps.metadata.outputs.version }}.zip
+            dist/ipguard-${{ steps.metadata.outputs.version }}.zip.sha256
+            dist/ha_ipguard-${{ steps.metadata.outputs.version }}-py3-none-any.whl
+            dist/ha_ipguard-${{ steps.metadata.outputs.version }}.tar.gz
+            dist/ipguard_api-${{ steps.metadata.outputs.sdk_version }}-py3-none-any.whl
+            dist/ipguard_api-${{ steps.metadata.outputs.sdk_version }}.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
