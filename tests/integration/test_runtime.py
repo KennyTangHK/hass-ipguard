@@ -13,10 +13,12 @@ from homeassistant.exceptions import (
     ConfigEntryError,
     ConfigEntryNotReady,
 )
+from homeassistant.setup import async_setup_component
 from ipguard_api import (
     AuthRevokedError,
     ClientSnapshot,
     ConnectionFailureError,
+    IncomingCall,
     Relay,
     Session,
     SessionStatus,
@@ -80,6 +82,66 @@ async def test_startup_push_and_unload_without_sms(
         )
         listener(ClientSnapshot((relay,), True, session=session))
         assert runtime.coordinator.connected is False
+
+
+@pytest.mark.parametrize("connected", [True, False])
+async def test_manual_refresh_preserves_push_state_without_cloud_actions(
+    hass: HomeAssistant,
+    client: Mock,
+    session: Session,
+    relay: Relay,
+    caplog: pytest.LogCaptureFixture,
+    connected: bool,
+) -> None:
+    assert await async_setup_component(hass, "homeassistant", {})
+    entry = add_entry(hass, session)
+    with patch("custom_components.ipguard.IpguardClient", return_value=client):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        client.subscribe_calls.call_args.args[0](IncomingCall(relay.board))
+        await hass.async_block_till_done()
+        event_state = hass.states.async_all("event")[0]
+        listener = client.subscribe.call_args.args[0]
+        listener(ClientSnapshot((relay,), connected, session=session))
+        await hass.async_block_till_done()
+
+        runtime = entry.runtime_data
+        coordinator = runtime.coordinator
+        states = hass.states.async_all("button") + hass.states.async_all("event")
+        assert len(states) == 2
+        before_states = {
+            state.entity_id: (state.state, state.attributes, state.last_changed)
+            for state in states
+        }
+        before_calls = list(client.mock_calls)
+        before_data = coordinator.data
+        assert coordinator.last_update_success
+        caplog.clear()
+
+        await hass.services.async_call(
+            "homeassistant",
+            "update_entity",
+            {"entity_id": list(before_states)},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+
+        assert coordinator.last_update_success
+        assert coordinator.connected is connected
+        assert coordinator.data == before_data
+        assert client.mock_calls == before_calls
+        assert "Update method not implemented" not in caplog.text
+        for entity_id, before in before_states.items():
+            state = hass.states.get(entity_id)
+            assert (state.state, state.attributes, state.last_changed) == before
+
+        listener(ClientSnapshot((relay,), True, session=session))
+        await hass.async_block_till_done()
+        restored = hass.states.get(event_state.entity_id)
+        assert restored.state == event_state.state
+        assert restored.attributes == event_state.attributes
+        assert hass.states.async_all("button")[0].state == STATE_UNKNOWN
+        assert await hass.config_entries.async_unload(entry.entry_id)
 
 
 async def test_revocation_starts_one_reauth_flow_without_sending_code(

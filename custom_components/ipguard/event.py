@@ -40,6 +40,9 @@ class IpguardIncomingCallEvent(CoordinatorEntity[IpguardCoordinator], EventEntit
     def available(self) -> bool:
         return self.coordinator.connected and not self._runtime.closing
 
+    async def async_update(self) -> None:
+        """Keep cached push data when Home Assistant requests a manual update."""
+
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
 

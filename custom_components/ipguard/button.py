@@ -81,6 +81,9 @@ class IpguardReleaseButton(CoordinatorEntity[IpguardCoordinator], ButtonEntity):
             and not relay.pending_confirmation
         )
 
+    async def async_update(self) -> None:
+        """Keep cached push data when Home Assistant requests a manual update."""
+
     async def async_press(self) -> None:
         """Reject parallel/offline presses; send once and never replay uncertainty."""
         if not self.available:
