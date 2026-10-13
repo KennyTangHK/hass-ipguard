@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "ha-ipguard"
 # Development snapshot; release workflows generate this from the pushed tag.
 version = "0.1.0b4"
-description = "IPGUARD cloud door-release buttons and incoming call events for Home Assistant"
+description = "IPGUARD door-release buttons, call events and optional video for Home Assistant"
 readme = "README.md"
 requires-python = ">=3.14.2,<3.15"
 license = "Apache-2.0"
@@ -27,14 +27,17 @@ only-include = [
     "custom_components/ipguard/brand/icon.svg",
     "custom_components/ipguard/brand/icon@2x.png",
     "custom_components/ipguard/button.py",
+    "custom_components/ipguard/camera.py",
     "custom_components/ipguard/config_flow.py",
     "custom_components/ipguard/const.py",
     "custom_components/ipguard/event.py",
     "custom_components/ipguard/manifest.json",
+    "custom_components/ipguard/media.py",
     "custom_components/ipguard/quality_scale.yaml",
     "custom_components/ipguard/runtime.py",
     "custom_components/ipguard/strings.json",
     "custom_components/ipguard/translations/en.json",
+    "custom_components/ipguard/video_setup.py",
 ]
 
 [tool.hatch.build.targets.sdist]
@@ -47,14 +50,17 @@ only-include = [
     "custom_components/ipguard/brand/icon.svg",
     "custom_components/ipguard/brand/icon@2x.png",
     "custom_components/ipguard/button.py",
+    "custom_components/ipguard/camera.py",
     "custom_components/ipguard/config_flow.py",
     "custom_components/ipguard/const.py",
     "custom_components/ipguard/event.py",
     "custom_components/ipguard/manifest.json",
+    "custom_components/ipguard/media.py",
     "custom_components/ipguard/quality_scale.yaml",
     "custom_components/ipguard/runtime.py",
     "custom_components/ipguard/strings.json",
     "custom_components/ipguard/translations/en.json",
+    "custom_components/ipguard/video_setup.py",
     "docs/PROTOCOL.md",
     "docs/USAGE.md",
     "README.md",
@@ -70,12 +76,14 @@ only-include = [
 
 [dependency-groups]
 dev = [
+    "av==19.0.0",
     "hatchling==1.32.4",
     "homeassistant==2026.10.0",
     "mypy==2.4.0",
     "pytest==9.0.3",
     "pytest-asyncio==1.4.0",
     "pytest-homeassistant-custom-component==0.13.371",
+    "PyTurboJPEG==1.8.3",
     "ruff==0.16.10",
 ]
 

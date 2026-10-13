@@ -154,6 +154,25 @@ class IncomingCall:
 
 
 @dataclass(frozen=True, slots=True)
+class MediaSnapshot:
+    """Cached preview availability; the local handle is private bridge data."""
+
+    state: str
+    call_id: str | None = field(default=None, repr=False)
+    board: Board | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MediaOffer:
+    """One private receiver claim, never suitable for entities or diagnostics."""
+
+    call_id: str = field(repr=False)
+    claim_id: str = field(repr=False)
+    sdp: str = field(repr=False)
+    expires_at: float
+
+
+@dataclass(frozen=True, slots=True)
 class Relay:
     """A discovered relay and its permission to perform a release action.
 

@@ -30,6 +30,7 @@ from ipguard_api.protocol import (
     envelope,
     hello,
     incoming_call,
+    media_answer,
     relay_inventory,
 )
 
@@ -431,6 +432,40 @@ def test_call_field_bounds_are_encoded_byte_limits_and_tokens_are_opaque():
     assert incoming_call(packet, {}) is not None
     packet["header"]["event"] = "srv_sp_sdp_offer"
     assert incoming_call(packet, {}) is None
+
+
+def test_media_answer_has_exact_correlated_android_shape_and_opaque_token():
+    import base64
+
+    answer = "v=0\r\ns=private-answer\r\na=ice-pwd:private-secret\r\n"
+    packet = media_answer("installation", "board", "opaque_Node.js_CLI_token", answer)
+    assert_android_metadata(packet)
+    assert packet["header"]["event"] == "sp_ps_sdp_answer"
+    assert packet["body"] == {
+        "token": "opaque_Node.js_CLI_token",
+        "remoteIdentity": "board",
+        "sdp": base64.b64encode(answer.encode()).decode(),
+    }
+    packet["body"]["media"] = ["audio"]
+    with pytest.raises(InvalidInputError):
+        assert_android_metadata(packet)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "",
+        "private-invalid",
+        "v=0\r\nprivate\0secret",
+        "v=0\r\nprivate\ud800secret",
+        "v=0\r\n" + "x" * MAX_CALL_SDP_BYTES,
+        None,
+    ],
+)
+def test_media_answer_rejects_invalid_or_unbounded_descriptions_privately(answer):
+    with pytest.raises(InvalidInputError) as raised:
+        media_answer("installation", "board", "token", answer)
+    assert "private" not in str(raised.value)
 
 
 @pytest.mark.parametrize("field", ["name", "site_id", "site_name"])

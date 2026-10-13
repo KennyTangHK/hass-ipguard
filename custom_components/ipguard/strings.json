@@ -68,6 +68,11 @@
       "incoming_call": {
         "name": "{account} incoming call"
       }
+    },
+    "camera": {
+      "incoming_video": {
+        "name": "Incoming video"
+      }
     }
   },
   "exceptions": {
@@ -91,6 +96,47 @@
     },
     "release_failed": {
       "message": "IPGUARD rejected the release request or the connection failed. It has not been retried."
+    },
+    "media_unavailable": {
+      "message": "No current incoming video is available."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Incoming video",
+        "description": "Video requires a Scrypted server and the IPGUARD companion plugin. Door release buttons and incoming call events continue to work without video. Enabling video allows the first RTSP stream request, including a media probe, to answer a current incoming offer.",
+        "data": {
+          "video_enabled": "Enable incoming video"
+        }
+      },
+      "video": {
+        "title": "Pair Scrypted",
+        "description": "Install the IPGUARD companion in Scrypted first. Leave the URLs blank to use a running Scrypted Home Assistant app or an already configured Scrypted server and Home Assistant’s own address. The Home Assistant app pairs through your existing HA access; leave its username and password blank. Other servers need a Scrypted administrator login, used only for pairing.",
+        "data": {
+          "scrypted_url": "Scrypted HTTPS URL",
+          "ha_url": "Home Assistant URL",
+          "username": "Scrypted username",
+          "password": "Scrypted password",
+          "verify_ssl": "Verify Scrypted certificate"
+        },
+        "data_description": {
+          "scrypted_url": "Optional override. Leave blank for automatic detection. Otherwise use an HTTPS server origin without a path or credentials.",
+          "ha_url": "Optional override. Leave blank to use Home Assistant’s address. It must be reachable from Scrypted.",
+          "verify_ssl": "Applies to direct HTTPS pairing. Leave enabled for a trusted certificate. Disable only for a Scrypted server whose self-signed certificate you trust.",
+          "username": "Leave blank for the Scrypted Home Assistant app. Required with the password for a separate Scrypted server.",
+          "password": "Leave blank for the Scrypted Home Assistant app. A supplied password is used only for pairing and is not saved."
+        }
+      }
+    },
+    "error": {
+      "invalid_video_input": "Enter valid server URLs and Scrypted credentials.",
+      "cannot_pair": "Unable to pair. Check the Scrypted plugin, credentials, certificate setting, and connectivity in both directions.",
+      "cannot_discover": "Unable to read installed app information. Try again or enter the Scrypted HTTPS URL and login.",
+      "scrypted_not_found": "No running Scrypted Home Assistant app or configured Scrypted server was found. Start the app or enter the server’s HTTPS URL.",
+      "multiple_scrypted": "More than one Scrypted server was found. Enter the HTTPS URL of the server to pair.",
+      "ha_url_unavailable": "Home Assistant could not determine its address. Enter a Home Assistant URL reachable from Scrypted.",
+      "scrypted_credentials_required": "This server needs a Scrypted administrator username and password. Leave both blank only for the automatically detected Home Assistant app."
     }
   }
 }

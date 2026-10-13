@@ -6,6 +6,7 @@ import json
 import time
 from binascii import Error as Base64Error
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
 from unicodedata import category
 from uuid import uuid4
@@ -99,10 +100,18 @@ def packet_sender(packet: Packet) -> object:
     return header.get("sender") if isinstance(header, dict) else None
 
 
-def incoming_call(
-    packet: Packet, boards: Mapping[str, Board]
-) -> tuple[IncomingCall, bytes] | None:
-    """Validate an offer and discard signalling data after hashing its token.
+@dataclass(frozen=True, slots=True)
+class _CallOffer:
+    notification: IncomingCall
+    token_hash: bytes = field(repr=False)
+    sender: str = field(repr=False)
+    remote: str = field(repr=False)
+    token: str = field(repr=False)
+    sdp: str = field(repr=False)
+
+
+def parse_call_offer(packet: Packet, boards: Mapping[str, Board]) -> _CallOffer | None:
+    """Validate once for the SDK's safe notification and private media views.
 
     Authentication and current-transport checks belong to the caller. The SDP
     is bounded and checked as encoded text only; no media session is created.
@@ -158,7 +167,43 @@ def incoming_call(
             site_id=_call_metadata(board.site_id) or None,
             site_name=_call_metadata(board.site_name) or None,
         )
-    return IncomingCall(board), hashlib.sha256(encoded_token).digest()
+    return _CallOffer(
+        IncomingCall(board),
+        hashlib.sha256(encoded_token).digest(),
+        sender,
+        remote,
+        token,
+        description,
+    )
+
+
+def incoming_call(
+    packet: Packet, boards: Mapping[str, Board]
+) -> tuple[IncomingCall, bytes] | None:
+    """Return only the passive notification and a digest for legacy callers."""
+    offer = parse_call_offer(packet, boards)
+    return (offer.notification, offer.token_hash) if offer is not None else None
+
+
+def media_answer(identity: str, remote: str, token: str, sdp: str) -> Packet:
+    """Build only a bounded complete answer with exact call correlation."""
+    validate_routing_identity(remote)
+    validate_utf8(token, MAX_CALL_TOKEN_BYTES, "Invalid call token.")
+    raw_sdp = validate_utf8(sdp, MAX_CALL_SDP_BYTES * 3 // 4, "Invalid media answer.")
+    if (
+        not token.strip()
+        or any(ord(char) < 32 for char in token)
+        or not sdp
+        or "\0" in sdp
+        or sdp.splitlines()[0] != "v=0"
+    ):
+        raise InvalidInputError("Invalid media answer.")
+    encoded = base64.b64encode(raw_sdp).decode("ascii")
+    if len(encoded) > MAX_CALL_SDP_BYTES:
+        raise InvalidInputError("Invalid media answer.")
+    return envelope(
+        identity, "sp_ps_sdp_answer", {"remoteIdentity": remote, "sdp": encoded}, token
+    )
 
 
 def _call_metadata(value: str | None) -> str:
@@ -249,6 +294,7 @@ def assert_android_metadata(packet: Packet) -> None:
         "sp_srv_override_username": {"token", "code", "username", "model"},
         "sp_srv_update_ack": {"token"},
         "sp_brd_open_door": {"token", "door"},
+        "sp_ps_sdp_answer": {"token", "remoteIdentity", "sdp"},
     }
     expected_keys = allowed.get(event)
     if expected_keys is None:
@@ -259,6 +305,14 @@ def assert_android_metadata(packet: Packet) -> None:
         expected_keys = expected_keys | set(identifiers)
     if set(body) != expected_keys:
         raise InvalidInputError("Unsupported Android message fields.")
+    if event == "sp_ps_sdp_answer":
+        # Reuse the bounded offer encoding validation, without accepting extras.
+        offer_packet: Packet = {
+            "header": {"event": "ps_sp_sdp_offer", "sender": header["sender"]},
+            "body": body,
+        }
+        if parse_call_offer(offer_packet, {}) is None:
+            raise InvalidInputError("Invalid media answer.")
     if "code" in body:
         validate_verification_code(body["code"])
     if event in ("sp_srv_check_username", "sp_srv_override_username"):

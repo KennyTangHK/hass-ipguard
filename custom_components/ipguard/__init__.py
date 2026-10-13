@@ -2,13 +2,15 @@
 
 from collections.abc import Mapping
 
-from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import (
     ConfigEntryAuthFailed,
     ConfigEntryError,
     ConfigEntryNotReady,
 )
+from homeassistant.helpers.typing import ConfigType
+from homeassistant.setup import async_setup_component
 
 from .api import (
     AuthenticationError,
@@ -21,12 +23,19 @@ from .api import (
     SessionStatus,
 )
 from .const import CONF_SESSION, DOMAIN, PLATFORMS
+from .media import manager, register_views
 from .runtime import (
     IpguardConfigEntry,
     IpguardCoordinator,
     IpguardRuntimeData,
     persist_session,
 )
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register local bridge routes once; no provider action is performed."""
+    register_views(hass)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: IpguardConfigEntry) -> bool:
@@ -49,6 +58,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: IpguardConfigEntry) -> b
 
     client = IpguardClient(session=session)
     runtime = IpguardRuntimeData(client, IpguardCoordinator(hass, entry))
+    owner = manager(hass)
+    runtime.media = owner.create_bridge(entry, client)
+
+    @callback
+    def unregister_media() -> None:
+        if owner.bridges.get(entry.entry_id) is runtime.media:
+            owner.bridges.pop(entry.entry_id, None)
+
+    runtime.unregister_media = unregister_media
 
     async def reauthenticate() -> None:
         await runtime.async_close()
@@ -103,7 +121,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: IpguardConfigEntry) -> b
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, shutdown)
     )
     try:
-        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        if runtime.media is not None and not await async_setup_component(
+            hass, "stream", {}
+        ):
+            raise ConfigEntryNotReady(
+                translation_domain=DOMAIN, translation_key="media_unavailable"
+            )
+        await hass.config_entries.async_forward_entry_setups(
+            entry,
+            [
+                platform
+                for platform in PLATFORMS
+                if platform != Platform.CAMERA or runtime.media is not None
+            ],
+        )
     except BaseException:
         await runtime.async_close()
         raise
@@ -112,7 +143,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: IpguardConfigEntry) -> b
 
 async def async_unload_entry(hass: HomeAssistant, entry: IpguardConfigEntry) -> bool:
     """Unload entities and stop every cloud resource owned by this entry."""
-    if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+    if not await hass.config_entries.async_unload_platforms(
+        entry,
+        [
+            platform
+            for platform in PLATFORMS
+            if platform != Platform.CAMERA or entry.runtime_data.media is not None
+        ],
+    ):
         return False
     await entry.runtime_data.async_close()
     return True
