@@ -39,7 +39,7 @@ The integration sends Android-compatible handset metadata. Its local display nam
 
 ## Incoming call notifications
 
-Each account has an **incoming call** event entity with the doorbell device class, including accounts without remotely releasable relays. It emits `ring` when a valid incoming offer arrives over the account's existing ZeroMQ connection. Receipt alone does not register with Firebase, answer or acknowledge the call, negotiate media, or release a door.
+Each account has an **incoming call** event entity with the doorbell device class, including accounts without remotely releasable relays. It emits `ring` when a valid incoming offer arrives over the account's existing ZeroMQ connection. The ring event is still published, and this experimental build then attempts automatic refusal once for the fresh call. It does not register with Firebase, answer the call, negotiate media, or release a door.
 
 Use the entity's **Ring** trigger in an automation. For example, replace the entity ID below with the one shown in **Settings → Devices & services → IPGUARD → Entities**:
 
@@ -63,11 +63,21 @@ The event state is the last ring's timestamp, rather than a ringing on/off statu
 
 The entity becomes unavailable when disconnected or authorization is revoked. Calls while disconnected cannot be recovered. Calls received while the current secure connection is getting ready are buffered briefly in memory and discarded on connection failure or unload. Delivery depends on the provider routing calls to the active connection; notification delivery for another account is not guaranteed by local tests.
 
+## Temporary automatic-refusal trial
+
+This build enables automatic refusal for every loaded IPGUARD account, with no configuration option. When a fresh validated internet call arrives, it publishes the usual ring event and attempts one `sp_brd_hangup_call` with numeric `cause: 0`, using that call's original token and caller route.
+
+The trial asks whether refusing the internet call makes an ordinary carrier call arrive sooner. **It may cancel the call instead, including delivery to other recipients.** Faster fallback is unverified. [TODO #2](https://github.com/KennyTangHK/hass-ipguard/issues/2) records the supervised comparison and the decision to keep, revise or remove this behavior.
+
+Repeated offers do not cause another attempt within the existing bounded in-memory duplicate-suppression window. A call received before the connection is ready, or one that is stale, superseded or terminated, is skipped. A busy connection or prior-attempt cleanup does not queue the command. Disconnect/unload cancels pending work. There is no acknowledgement wait, automatic retry or replay after an uncertain result. Duplicate history is not persisted across a full process restart, so restart only between test calls.
+
+For the test, enable debug logging from **Settings → Devices & services → IPGUARD → Enable debug logging**, make a supervised intercom call, and record the time to the carrier call. Disable debug logging afterwards to download the capture. Auto-hangup records show only fixed attempt/outcome categories. A local `sent` outcome does not prove that the provider accepted refusal or initiated a carrier call. Compare with the normal build and check other configured recipients before deciding whether to keep the trial.
+
 ## Unsupported call features
 
-**Video calling and camera streaming are not supported.** The integration does not answer calls, negotiate media, provide audio conversation or expose refusal/hangup controls. Use the official app or your provider's normal phone-call service to answer calls.
+**Video calling and camera streaming are not supported.** The integration does not answer calls, negotiate media, provide audio conversation or expose manual refusal/hangup controls. The temporary automatic-refusal trial above is the only call-control behavior. Use the official app or your provider's normal phone-call service to answer calls.
 
-Carrier-call fallback is controlled by the provider. The integration has no supported action to trigger it sooner and sends no call-control signal on a ring.
+Carrier-call fallback is controlled by the provider. Automatic refusal is an experiment, not a verified fallback command; there is no supported guarantee of an earlier carrier call.
 
 Upgrading removes the earlier video settings and incoming-video camera while preserving saved account authorization, release buttons and incoming-call event entity IDs. If you installed the IPGUARD Incoming Video plugin in Scrypted, remove that plugin in Scrypted; updating this integration does not uninstall Scrypted or its plugins. Scrypted is no longer used by this integration.
 

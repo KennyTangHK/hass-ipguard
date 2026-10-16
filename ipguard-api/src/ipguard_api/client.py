@@ -4,7 +4,7 @@ import asyncio
 import logging
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import wraps
 from struct import error as StructError
 from time import monotonic
@@ -43,6 +43,7 @@ from .protocol import (
     configuration_password,
     door_inventory,
     envelope,
+    hangup_call,
     hello,
     identifier_fields,
     incoming_call,
@@ -63,6 +64,7 @@ type Listener = Callable[[ClientSnapshot], None]
 type CallListener = Callable[[IncomingCall], None]
 MAX_RECENT_CALLS = 256
 RECENT_CALL_TTL = 15 * 60
+AUTO_HANGUP_TTL = 5.0
 _LOGGER = logging.getLogger(__name__)
 _LOGGED_EVENTS = frozenset(
     {
@@ -77,6 +79,15 @@ _LOGGED_EVENTS = frozenset(
         "brd_sp_open_door_ack",
     }
 )
+
+
+@dataclass(eq=False, repr=False, slots=True)
+class _AutomaticHangup:
+    transport: ZmqTransport
+    token: str
+    remote: str
+    sender: str
+    deadline: float
 
 
 def _cancel_cleanup[**P, R](
@@ -105,7 +116,10 @@ class IpguardClient:
         secure_endpoint: str = DEFAULT_SECURE_ENDPOINT,
         reconnect_delay: float = 1.0,
         max_reconnect_delay: float = 30.0,
+        auto_hangup: bool = False,
     ) -> None:
+        if type(auto_hangup) is not bool:
+            raise InvalidInputError("Automatic hangup must be a boolean.")
         self.timeout = validate_duration(timeout, 300)
         reconnect_delay = validate_duration(reconnect_delay, 3600)
         max_reconnect_delay = validate_duration(max_reconnect_delay, 3600)
@@ -130,6 +144,9 @@ class IpguardClient:
         self._call_listeners: set[CallListener] = set()
         self._call_tokens: OrderedDict[bytes, float] = OrderedDict()
         self._call_boards: dict[str, Board] = {}
+        self._auto_hangup = auto_hangup
+        self._hangup_call: _AutomaticHangup | None = None
+        self._hangup_task: asyncio.Task[None] | None = None
         self._relays: tuple[Relay, ...] = ()
         self._connected = False
         self._revoked = False
@@ -164,12 +181,14 @@ class IpguardClient:
         return lambda: self._listeners.discard(callback)
 
     def subscribe_calls(self, callback: CallListener) -> Callable[[], None]:
-        """Subscribe to sanitized incoming offers; no call response is sent.
+        """Subscribe to sanitized incoming offers.
 
         Callbacks run synchronously on the event loop. Notifications are not
         replayed to later subscribers. The removal function is idempotent.
         Duplicate tokens are remembered across reconnects for 15 minutes after
         their last receipt, subject to a limit of 256 recent tokens.
+        The default is passive; the temporary auto_hangup experiment sends one
+        hangup attempt after notification, without answering or negotiating media.
         """
         self._call_listeners.add(callback)
         return lambda: self._call_listeners.discard(callback)
@@ -511,6 +530,7 @@ class IpguardClient:
         )
 
     async def _new_transport(self, *, secure: bool) -> ZmqTransport:
+        await self._stop_auto_hangup()
         if self._transport is not None:
             await self._transport.async_close()
         self._connected = False
@@ -524,6 +544,7 @@ class IpguardClient:
             if packet_event(packet) == "ps_sp_sdp_offer":
                 self._receive_call(packet, transport)
             else:
+                self._receive_call_termination(packet, transport)
                 await self._on_packet(packet)
 
         transport = ZmqTransport(
@@ -575,12 +596,110 @@ class IpguardClient:
         self._call_tokens[token_hash] = now
         if len(self._call_tokens) > MAX_RECENT_CALLS:
             self._call_tokens.popitem(last=False)
+        self._invalidate_auto_hangup()
         for callback in tuple(self._call_listeners):
             try:
                 callback(notification)
             except Exception:
                 # Callback errors may contain private downstream data.
                 continue
+        if self._auto_hangup:
+            self._schedule_auto_hangup(packet, transport, now)
+
+    def _schedule_auto_hangup(
+        self, packet: Packet, transport: ZmqTransport, received: float
+    ) -> None:
+        if self._hangup_task is not None and not self._hangup_task.done():
+            _LOGGER.debug("IPGUARD auto hangup outcome=skipped")
+            return
+        body = packet_body(packet)
+        token, remote, sender = (
+            body.get("token"),
+            body.get("remoteIdentity"),
+            packet_sender(packet),
+        )
+        # These fields were validated together with the discarded description.
+        assert isinstance(token, str)
+        assert isinstance(remote, str)
+        assert isinstance(sender, str)
+        call = self._hangup_call = _AutomaticHangup(
+            transport, token, remote, sender, received + AUTO_HANGUP_TTL
+        )
+        self._hangup_task = asyncio.create_task(
+            self._send_auto_hangup(call), name="ipguard-auto-hangup"
+        )
+
+    async def _send_auto_hangup(self, call: _AutomaticHangup) -> None:
+        attempted = False
+
+        def before_send() -> None:
+            nonlocal attempted
+            if (
+                self._hangup_call is not call
+                or not self._connected
+                or not self._call_transport_current(call.transport)
+                or monotonic() >= call.deadline
+            ):
+                raise ConnectionFailureError("The incoming call is no longer current.")
+            attempted = True
+            _LOGGER.debug("IPGUARD auto hangup outcome=attempted")
+
+        try:
+            async with asyncio.timeout(min(self.timeout, AUTO_HANGUP_TTL)):
+                await call.transport.async_send(
+                    hangup_call(call.transport.identity, call.token),
+                    call.remote,
+                    before_send=before_send,
+                )
+            _LOGGER.debug("IPGUARD auto hangup outcome=sent")
+        except asyncio.CancelledError:
+            _LOGGER.debug(
+                "IPGUARD auto hangup outcome=%s",
+                "uncertain" if attempted else "skipped",
+            )
+            raise
+        except Exception:
+            _LOGGER.debug(
+                "IPGUARD auto hangup outcome=%s",
+                "uncertain" if attempted else "skipped",
+            )
+        finally:
+            if self._hangup_call is call:
+                self._hangup_call = None
+
+    def _receive_call_termination(
+        self, packet: Packet, transport: ZmqTransport
+    ) -> None:
+        call = self._hangup_call
+        if call is None or transport is not call.transport:
+            return
+        event, body, sender = (
+            packet_event(packet),
+            packet_body(packet),
+            packet_sender(packet),
+        )
+        expected = {
+            "ps_sp_hangup_call": call.sender,
+            "brd_sp_hangup_call": call.remote,
+        }.get(event)
+        if (
+            expected is not None
+            and sender == expected
+            and body.get("token") == call.token
+            and ("remoteIdentity" not in body or body["remoteIdentity"] == call.remote)
+        ):
+            self._invalidate_auto_hangup()
+
+    def _invalidate_auto_hangup(self) -> None:
+        self._hangup_call = None
+        if self._hangup_task is not None and not self._hangup_task.done():
+            self._hangup_task.cancel()
+
+    async def _stop_auto_hangup(self) -> None:
+        self._invalidate_auto_hangup()
+        task, self._hangup_task = self._hangup_task, None
+        if task is not None and task is not asyncio.current_task():
+            await asyncio.gather(task, return_exceptions=True)
 
     async def _on_packet(self, packet: Packet) -> None:
         event, body = packet_event(packet), packet_body(packet)
@@ -636,6 +755,7 @@ class IpguardClient:
             raise self._error
 
     def _on_failure(self, error: IpguardError) -> None:
+        self._invalidate_auto_hangup()
         self._connected, self._error = False, error
         self._failure_ready.set()
         self._revoked = isinstance(error, AuthRevokedError)
@@ -672,6 +792,7 @@ class IpguardClient:
 
     async def _stop_connection(self) -> None:
         self._closed = True
+        await self._stop_auto_hangup()
         task, self._reconnect_task = self._reconnect_task, None
         if task and task is not asyncio.current_task():
             task.cancel()

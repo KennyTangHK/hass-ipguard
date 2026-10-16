@@ -251,6 +251,9 @@ class FakeCloud:
                         await self.configuration(route)
                 elif event == "sp_srv_update_ack":
                     assert body["token"] == "opaque_Node.js_CLI_token"
+                elif event == "sp_brd_hangup_call":
+                    assert channel == "secure" and len(frames) == 3
+                    assert type(body["cause"]) is int and body["cause"] == 0
                 elif event == "sp_brd_open_door":
                     assert (
                         channel == "secure"
@@ -1299,3 +1302,342 @@ async def test_readiness_failure_ignores_late_offers_until_fresh_transport(
         await failed_transport.on_packet(offer_packet("stale-failed-token"))
         assert len(calls) == 1
         assert cloud.events() == ["hello", "hello", "hello"]
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true"])
+def test_automatic_hangup_requires_an_explicit_boolean(value):
+    with pytest.raises(InvalidInputError):
+        IpguardClient(auto_hangup=value)
+
+
+async def test_automatic_hangup_notifies_then_sends_original_token_to_remote_board(
+    cloud, caplog, monkeypatch
+):
+    caplog.set_level(logging.DEBUG, logger="ipguard_api")
+    async with cloud.client(auto_hangup=True) as client:
+        await client.async_connect(cloud.saved_session())
+        calls = []
+        client.subscribe_calls(calls.append)
+        transport = client._transport
+        original = transport.async_send
+
+        async def observe_send(packet, callee="", **kwargs):
+            assert len(calls) == 1
+            assert packet_event(packet) == "sp_brd_hangup_call"
+            await original(packet, callee, **kwargs)
+
+        monkeypatch.setattr(transport, "async_send", observe_send)
+        token = "private_CLI_Node.js_Home Assistant_å_token"
+        packet = offer_packet(
+            token, "private-remote-board", "private-signalling-server"
+        )
+        await push_packet(cloud, packet)
+        await cloud.wait_for_event("sp_brd_hangup_call")
+        await inventory_barrier(client, cloud)
+        record = cloud.records[-1]
+        assert record[0] == "secure"
+        assert record[1][1] == b"private-remote-board"
+        assert record[2]["header"]["sender"] == client.session.identity
+        assert record[2]["body"] == {"token": token, "cause": 0}
+        assert type(record[2]["body"]["cause"]) is int
+        assert calls == [IncomingCall()]
+        assert transport._pending == set()
+        assert client.connected and client._hangup_call is None
+        await push_packet(cloud, packet)
+        await inventory_barrier(client, cloud)
+        assert cloud.events() == ["hello", "sp_brd_hangup_call"]
+        assert "outcome=attempted" in caplog.text
+        assert "outcome=sent" in caplog.text
+        for secret in (
+            token,
+            "private-remote-board",
+            "private-signalling-server",
+            "private-media-description",
+            "private-ice-password",
+            packet["body"]["sdp"],
+        ):
+            assert secret not in caplog.text + repr(calls) + repr(client._call_tokens)
+
+
+async def test_automatic_hangup_uncertainty_is_not_retried_after_reconnect(
+    cloud, monkeypatch, caplog
+):
+    caplog.set_level(logging.DEBUG, logger="ipguard_api")
+    async with cloud.client(auto_hangup=True) as client:
+        session = cloud.saved_session()
+        await client.async_connect(session)
+        original = client._transport.async_send
+
+        async def send_then_fail(packet, callee="", **kwargs):
+            await original(packet, callee, **kwargs)
+            raise ConnectionFailureError("private-transmission-error-token")
+
+        monkeypatch.setattr(client._transport, "async_send", send_then_fail)
+        await push_packet(cloud, offer_packet("private-uncertain-token"))
+        await cloud.wait_for_event("sp_brd_hangup_call")
+        await inventory_barrier(client, cloud)
+        assert "outcome=uncertain" in caplog.text
+        assert "private-transmission-error-token" not in caplog.text
+        assert client.connected and client.snapshot.error is None
+        await client.async_connect(session)
+        await push_packet(cloud, offer_packet("private-uncertain-token"))
+        await inventory_barrier(client, cloud)
+        assert cloud.events().count("sp_brd_hangup_call") == 1
+
+
+async def test_automatic_hangup_does_not_queue_a_busy_write_or_retry_duplicate(
+    cloud, caplog
+):
+    caplog.set_level(logging.DEBUG, logger="ipguard_api")
+    async with cloud.client(auto_hangup=True) as client:
+        await client.async_connect(cloud.saved_session())
+        transport = client._transport
+        await transport._send_lock.acquire()
+        try:
+            await push_packet(cloud, offer_packet("private-busy-token"))
+            await inventory_barrier(client, cloud)
+            await asyncio.wait_for(asyncio.shield(client._hangup_task), 1)
+            assert "outcome=skipped" in caplog.text
+            assert "outcome=attempted" not in caplog.text
+        finally:
+            transport._send_lock.release()
+        await push_packet(cloud, offer_packet("private-busy-token"))
+        await inventory_barrier(client, cloud)
+        assert cloud.events() == ["hello"]
+
+
+@pytest.mark.parametrize("event", ["ps_sp_hangup_call", "brd_sp_hangup_call"])
+async def test_correlated_termination_cancels_pending_hangup_without_blocking_reader(
+    cloud, monkeypatch, event
+):
+    async with cloud.client(auto_hangup=True) as client:
+        await client.async_connect(cloud.saved_session())
+        transport = client._transport
+        original = transport.async_send
+        entered, resume = asyncio.Event(), asyncio.Event()
+
+        async def pause_send(packet, callee="", **kwargs):
+            entered.set()
+            await resume.wait()
+            await original(packet, callee, **kwargs)
+
+        monkeypatch.setattr(transport, "async_send", pause_send)
+        await push_packet(cloud, offer_packet("private-terminated-token"))
+        await asyncio.wait_for(entered.wait(), 1)
+        sender = (
+            "private-offer-sender" if event.startswith("ps_") else "synthetic-board"
+        )
+        await push_packet(
+            cloud, envelope(sender, event, {}, "private-terminated-token")
+        )
+        await inventory_barrier(client, cloud)
+        assert client._hangup_call is None
+        assert client._hangup_task.done()
+        resume.set()
+        await push_packet(cloud, offer_packet("private-terminated-token"))
+        await inventory_barrier(client, cloud)
+        assert cloud.events() == ["hello"]
+
+
+@pytest.mark.parametrize(
+    "sender,token,body",
+    [
+        ("wrong-sender", "private-waiting-token", {}),
+        ("private-offer-sender", "wrong-token", {}),
+        ("private-offer-sender", "", {}),
+        ("private-offer-sender", "private-waiting-token", {"remoteIdentity": "other"}),
+    ],
+)
+async def test_unrelated_termination_cannot_cancel_a_fresh_hangup(
+    cloud, monkeypatch, sender, token, body
+):
+    async with cloud.client(auto_hangup=True) as client:
+        await client.async_connect(cloud.saved_session())
+        transport = client._transport
+        original = transport.async_send
+        entered, resume = asyncio.Event(), asyncio.Event()
+
+        async def pause_send(packet, callee="", **kwargs):
+            entered.set()
+            await resume.wait()
+            await original(packet, callee, **kwargs)
+
+        monkeypatch.setattr(transport, "async_send", pause_send)
+        await push_packet(cloud, offer_packet("private-waiting-token"))
+        await asyncio.wait_for(entered.wait(), 1)
+        await push_packet(cloud, envelope(sender, "ps_sp_hangup_call", body, token))
+        await inventory_barrier(client, cloud)
+        assert client._hangup_call is not None
+        assert "private" not in repr(client._hangup_call)
+        resume.set()
+        await cloud.wait_for_event("sp_brd_hangup_call")
+
+
+@pytest.mark.parametrize("change", ["revoked", "failed", "expired", "transport"])
+async def test_hangup_rechecks_current_call_at_actual_write(cloud, monkeypatch, change):
+    import ipguard_api.client as client_module
+
+    async with cloud.client(auto_hangup=True) as client:
+        await client.async_connect(cloud.saved_session())
+        transport = client._transport
+        original = transport.async_send
+        entered, resume = asyncio.Event(), asyncio.Event()
+
+        async def pause_send(packet, callee="", **kwargs):
+            entered.set()
+            await resume.wait()
+            await original(packet, callee, **kwargs)
+
+        monkeypatch.setattr(transport, "async_send", pause_send)
+        await push_packet(cloud, offer_packet("private-stale-token"))
+        await asyncio.wait_for(entered.wait(), 1)
+        if change == "revoked":
+            client._session = replace(client.session, status=SessionStatus.DISABLED)
+        elif change == "failed":
+            client._error = ConnectionFailureError("private-failed-connection")
+        elif change == "expired":
+            received = client._hangup_call.deadline - client_module.AUTO_HANGUP_TTL
+            monkeypatch.setattr(client_module, "monotonic", lambda: received + 5.01)
+        else:
+            client._transport = None
+        resume.set()
+        await asyncio.wait_for(client._hangup_task, 1)
+        client._transport = transport
+        await inventory_barrier(client, cloud)
+        assert cloud.events() == ["hello"]
+
+
+async def test_new_offer_and_close_cancel_pending_hangup_without_replay(
+    cloud, monkeypatch
+):
+    client = cloud.client(auto_hangup=True)
+    await client.async_connect(cloud.saved_session())
+    transport = client._transport
+    entered, resume = asyncio.Event(), asyncio.Event()
+    original = transport.async_send
+
+    async def pause_send(packet, callee="", **kwargs):
+        entered.set()
+        await resume.wait()
+        await original(packet, callee, **kwargs)
+
+    monkeypatch.setattr(transport, "async_send", pause_send)
+    await push_packet(cloud, offer_packet("private-replaced-token"))
+    await asyncio.wait_for(entered.wait(), 1)
+    previous_task = client._hangup_task
+    await push_packet(cloud, offer_packet("private-replacement-token"))
+    await inventory_barrier(client, cloud)
+    assert previous_task.cancelled()
+    assert client._hangup_call is None
+    assert client._hangup_task is previous_task
+    entered.clear()
+    await push_packet(cloud, offer_packet("private-close-token"))
+    await asyncio.wait_for(entered.wait(), 1)
+    await client.async_close()
+    assert client._hangup_call is None and client._hangup_task is None
+    assert not [
+        task for task in asyncio.all_tasks() if task.get_name() == "ipguard-auto-hangup"
+    ]
+    resume.set()
+    assert cloud.events() == ["hello"]
+
+
+async def test_automatic_hangup_deadline_is_bounded_and_reader_remains_live(
+    cloud, monkeypatch, caplog
+):
+    caplog.set_level(logging.DEBUG, logger="ipguard_api")
+    async with cloud.client(auto_hangup=True, timeout=0.03) as client:
+        await client.async_connect(cloud.saved_session())
+        entered = asyncio.Event()
+
+        async def never_send(*args, **kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(client._transport, "async_send", never_send)
+        await push_packet(cloud, offer_packet("private-timeout-token"))
+        await asyncio.wait_for(entered.wait(), 1)
+        await inventory_barrier(client, cloud)
+        await asyncio.wait_for(client._hangup_task, 1)
+        assert client._hangup_call is None
+        assert "outcome=skipped" in caplog.text
+        assert cloud.events() == ["hello"] and client.connected
+
+
+async def test_automatic_hangup_skips_unready_startup_without_deferred_replay(cloud):
+    cloud.startup_offer = offer_packet("private-unready-token")
+    cloud.drop_inventory = True
+    client = cloud.client(auto_hangup=True)
+    offered = asyncio.Event()
+    client.subscribe_calls(lambda _: offered.set())
+    session = cloud.saved_session()
+    connect = asyncio.create_task(client.async_connect(session))
+    await asyncio.wait_for(offered.wait(), 1)
+    await asyncio.wait_for(client._hangup_task, 1)
+    assert not client.connected and client._hangup_call is None
+    await inventory_barrier(client, cloud)
+    await asyncio.wait_for(connect, 1)
+    await push_packet(cloud, offer_packet("private-unready-token"))
+    await inventory_barrier(client, cloud)
+    assert client.connected and cloud.events() == ["hello"]
+    await client.async_close()
+
+
+async def test_close_after_hangup_write_logs_uncertainty_and_never_replays(
+    cloud, monkeypatch, caplog
+):
+    caplog.set_level(logging.DEBUG, logger="ipguard_api")
+    client = cloud.client(auto_hangup=True)
+    session = cloud.saved_session()
+    await client.async_connect(session)
+    original = client._transport.async_send
+    written = asyncio.Event()
+
+    async def send_then_wait(packet, callee="", **kwargs):
+        await original(packet, callee, **kwargs)
+        written.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(client._transport, "async_send", send_then_wait)
+    await push_packet(cloud, offer_packet("private-cancelled-write-token"))
+    await asyncio.wait_for(written.wait(), 1)
+    await cloud.wait_for_event("sp_brd_hangup_call")
+    await client.async_close()
+    assert "outcome=attempted" in caplog.text
+    assert "outcome=uncertain" in caplog.text
+    assert "outcome=skipped" not in caplog.text
+    assert client._hangup_task is None
+    assert cloud.events() == ["hello", "sp_brd_hangup_call"]
+
+
+async def test_transport_failure_cancels_pending_hangup_and_duplicate_stays_consumed(
+    cloud, monkeypatch
+):
+    async with cloud.client(auto_hangup=True) as client:
+        session = cloud.saved_session()
+        await client.async_connect(session)
+        original = client._transport.async_send
+        entered, resume = asyncio.Event(), asyncio.Event()
+
+        async def pause_send(packet, callee="", **kwargs):
+            entered.set()
+            await resume.wait()
+            await original(packet, callee, **kwargs)
+
+        monkeypatch.setattr(client._transport, "async_send", pause_send)
+        await push_packet(cloud, offer_packet("private-disconnected-token"))
+        await asyncio.wait_for(entered.wait(), 1)
+        task = client._hangup_task
+        transport = client._transport
+        await transport.async_close()
+        client._on_failure(ConnectionFailureError("private-transport-failure"))
+        restored = asyncio.Event()
+        client.subscribe(
+            lambda snapshot: restored.set() if snapshot.connected else None
+        )
+        await asyncio.wait_for(restored.wait(), 1)
+        assert task.cancelled() and client._hangup_call is None
+        resume.set()
+        await push_packet(cloud, offer_packet("private-disconnected-token"))
+        await inventory_barrier(client, cloud)
+        assert cloud.events() == ["hello", "hello"]

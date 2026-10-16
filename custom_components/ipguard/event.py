@@ -1,4 +1,4 @@
-"""Passive account-level doorbell events from the existing cloud connection."""
+"""Account-level doorbell events from the existing cloud connection."""
 
 from homeassistant.components.event import (
     DoorbellEventType,

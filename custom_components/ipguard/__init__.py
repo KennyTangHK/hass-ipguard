@@ -87,7 +87,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: IpguardConfigEntry) -> b
             translation_domain=DOMAIN, translation_key="invalid_auth"
         )
 
-    client = IpguardClient(session=session)
+    client = IpguardClient(session=session, auto_hangup=True)
     runtime = IpguardRuntimeData(client, IpguardCoordinator(hass, entry))
 
     async def reauthenticate() -> None:

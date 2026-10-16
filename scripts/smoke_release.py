@@ -75,6 +75,8 @@ class CloudFixture:
         self.acknowledge = True
         self.permission = True
         self.existing = existing
+        self.call_routes: dict[str, str] = {}
+        self.hangups: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
     def settings(self) -> dict[str, str]:
         return {
@@ -142,6 +144,7 @@ class CloudFixture:
 
     async def incoming_call(self, token: str, remote_identity: str = BOARD) -> None:
         assert self.routing_id is not None
+        self.call_routes[token] = remote_identity
         await self.send(
             self.secure,
             self.routing_id,
@@ -165,6 +168,13 @@ class CloudFixture:
             header, body = packet["header"], packet["body"]
             event, token = header["event"], body["token"]
             assert routing_id.decode() == header["sender"]
+            if event == "sp_brd_hangup_call":
+                assert secure and len(frames) == 3
+                assert frames[1].decode() == self.call_routes[token]
+                assert set(body) == {"token", "cause"}
+                assert type(body["cause"]) is int and body["cause"] == 0
+                self.hangups.put_nowait(packet)
+                continue
             if event == "sp_brd_open_door":
                 assert secure and len(frames) == 3 and frames[1].decode() == BOARD
                 assert self.permission and body["door"] == 1
@@ -293,7 +303,7 @@ def entry_event_states(hass: HomeAssistant, entry_id: str) -> list[State]:
 async def check_incoming_calls(
     hass: HomeAssistant, fixture: CloudFixture, entry_id: str
 ) -> None:
-    """Exercise the packaged event through CURVE without transmitting a response."""
+    """Exercise safe rings and the one-attempt refusal trial through CURVE."""
     states = entry_event_states(hass, entry_id)
     assert len(states) == 1, {
         "event_entity_ids": [state.entity_id for state in states],
@@ -338,17 +348,23 @@ async def check_incoming_calls(
         for secret in ("fixture-private-call-token", "fixture-private-media-secret"):
             assert secret not in repr(state.as_dict())
         assert fixture.count("sp_brd_open_door") == 0
-        assert len(fixture.packets) == sent_before
+        hangup = await asyncio.wait_for(fixture.hangups.get(), 5)
+        assert hangup["body"] == {"token": "fixture-private-call-token", "cause": 0}
+        assert len(fixture.packets) == sent_before + 1
         await fixture.incoming_call("fixture-private-call-token")
         await asyncio.sleep(0.05)
         await hass.async_block_till_done()
         assert len(rings) == 1
+        assert len(fixture.packets) == sent_before + 1
+        assert fixture.hangups.empty()
         received.clear()
         await fixture.incoming_call("fixture-private-next-token", "unknown-board")
         async with asyncio.timeout(5):
             await received.wait()
         await hass.async_block_till_done()
         assert len(rings) == 2 and rings[0] != rings[1]
+        hangup = await asyncio.wait_for(fixture.hangups.get(), 5)
+        assert hangup["body"] == {"token": "fixture-private-next-token", "cause": 0}
         state = hass.states.get(entity_id)
         assert state is not None
         assert not any(
@@ -359,7 +375,9 @@ async def check_incoming_calls(
         await asyncio.sleep(0.05)
         await hass.async_block_till_done()
         assert len(rings) == 2
-        assert len(fixture.packets) == sent_before
+        assert len(fixture.packets) == sent_before + 2
+        assert fixture.count("sp_brd_hangup_call") == 2
+        assert fixture.hangups.empty()
         assert fixture.count("sp_brd_open_door") == 0
     finally:
         unsubscribe()
@@ -372,6 +390,7 @@ async def check_retired_video(
     component = importlib.import_module("custom_components.ipguard")
     registry = entity_registry.async_get(hass)
     session_before = dict(entry.data["session"])
+    hangups_before = fixture.count("sp_brd_hangup_call")
     entities_before = {
         record.entity_id: record.unique_id
         for record in registry.entities.values()
@@ -427,6 +446,7 @@ async def check_retired_video(
         ) as response:
             assert response.status in {401, 404}
     assert fixture.count("sp_ps_sdp_answer") == 0
+    assert fixture.count("sp_brd_hangup_call") == hangups_before
     assert fixture.count("sp_brd_open_door") == 0
 
 
@@ -540,7 +560,8 @@ async def check(
                         "same_entity_ids": True,
                         "no_sms_or_actuation": True,
                         "new_doorbell_event": True,
-                        "passive_incoming_call": True,
+                        "incoming_ring_event": True,
+                        "auto_hangup_trial": True,
                         "retired_video_removed": True,
                     }
                 )
@@ -680,7 +701,8 @@ async def check(
                     "invalid_code_retry": True,
                     "saved_session_setup": True,
                     "eligible_buttons": len(buttons),
-                    "passive_incoming_call": True,
+                    "incoming_ring_event": True,
+                    "auto_hangup_trial": True,
                     "duplicate_call_suppression": True,
                     "retired_video_removed": True,
                     "release_acknowledged": True,

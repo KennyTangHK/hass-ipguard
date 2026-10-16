@@ -71,13 +71,21 @@ async def listen(saved_data, stop):
             unsubscribe()
 ```
 
-`IncomingCall` contains only an optional `Board` matched by exact identity against the latest cached inventory. Unknown or ambiguous callers still produce a callback with `board=None`. Optional board/site labels and the site identity are omitted if malformed, contain control characters or exceed 256 UTF-8 bytes. Call tokens, routing senders, SDP and media credentials are not retained after notification processing or exposed in callback data. Offers must come from the current authenticated transport for an activated installation; malformed offers are ignored without interrupting relay updates.
+`IncomingCall` contains only an optional `Board` matched by exact identity against the latest cached inventory. Unknown or ambiguous callers still produce a callback with `board=None`. Optional board/site labels and the site identity are omitted if malformed, contain control characters or exceed 256 UTF-8 bytes. Call tokens, routing senders, SDP and media credentials are never exposed in callback data. Media descriptions are validated and discarded. Offers must come from the current authenticated transport for an activated installation; malformed offers are ignored without interrupting relay updates.
 
-Callbacks may arrive before `async_connect` completes, including during reconnect. Callers should briefly buffer sanitized notifications if their own interface is not ready. Receipt does not acknowledge an offer, answer, pick up, hang up or negotiate media. It does not use Firebase. Live server delivery with an empty mobile push token remains a field check.
+Callbacks may arrive before `async_connect` completes, including during reconnect. Callers should briefly buffer sanitized notifications if their own interface is not ready. With the default constructor, receipt does not acknowledge an offer, answer, pick up, hang up or negotiate media. It does not use Firebase. Live server delivery with an empty mobile push token remains a field check.
 
 Deduplication stores at most 256 token digests. Repeated offers refresh a 15-minute idle expiry; the cache survives reconnects for the same installation and clears on explicit close or an installation change. No disconnected call history is fetched or replayed. Incoming payloads require bounded routing identities, an opaque token of at most 1,024 UTF-8 bytes and valid Base64 SDP of at most 256 KiB beginning with `v=0`.
 
-Video calling and camera streaming are not supported. The SDK has no offer-retention, answer or media-session API. It does not send ring acknowledgements, pickup, refusal or hangup commands.
+Video calling and camera streaming are not supported. The SDK has no offer-retention, answer or media-session API. It does not send ring acknowledgements or pickup commands.
+
+### Temporary automatic hangup experiment
+
+`IpguardClient(auto_hangup=True)` opts into one immediate `sp_brd_hangup_call` attempt with numeric `cause: 0` after publishing each fresh, validated incoming-call notification. **This may cancel the call, including ordinary telephone fallback. Faster carrier fallback has not been established.** The Home Assistant integration temporarily enables this experiment without a configuration option.
+
+The original token and caller route are retained privately only for the bounded send attempt; the media description is discarded. The active connection and installation are checked again immediately before transmission, and an attempt more than five seconds old is skipped. Busy, stale, expired, disconnected or superseded attempts are skipped. A newer call invalidates an older pending attempt; if its cancellation is still settling, the newer attempt is skipped too rather than queued. Exact correlated provider termination and shutdown cancel pending work. No acknowledgement is awaited, and an uncertain send is not retried. Existing token deduplication also suppresses repeat attempts across reconnects for the same installation.
+
+Sanitized DEBUG messages report `IPGUARD auto hangup outcome=attempted`, `sent`, `uncertain` or `skipped`. `sent` confirms a local transport write only; it does not establish provider acceptance or carrier-call routing. These fixture-tested mechanics need a supervised live comparison before deciding whether to retain the experiment.
 
 ## Release one relay
 

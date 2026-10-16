@@ -1,4 +1,4 @@
-"""Incoming calls become passive, private Home Assistant doorbell events."""
+"""Incoming calls remain private Home Assistant doorbell events."""
 
 import asyncio
 import json
@@ -75,11 +75,14 @@ async def setup_ring_automation(
     await hass.async_block_till_done()
 
 
-async def test_doorbell_ring_runs_standard_automation_without_call_control(
+async def test_doorbell_ring_runs_standard_automation_with_auto_hangup_enabled(
     hass: HomeAssistant, client: Mock, session: Session, relay: Relay
 ) -> None:
-    with patch("custom_components.ipguard.IpguardClient", return_value=client):
+    with patch(
+        "custom_components.ipguard.IpguardClient", return_value=client
+    ) as factory:
         entry, entity_id = await setup_event(hass, client, session)
+        factory.assert_called_once_with(session=session, auto_hangup=True)
         state = hass.states.get(entity_id)
         assert state.state == STATE_UNKNOWN
         assert state.attributes["device_class"] == EventDeviceClass.DOORBELL

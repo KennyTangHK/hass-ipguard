@@ -51,6 +51,15 @@ def envelope(
     }
 
 
+def hangup_call(identity: str, token: str) -> Packet:
+    """Build the single supported hangup shape with the original call token."""
+    if not isinstance(token, str):
+        raise InvalidInputError("Invalid call token.")
+    packet = envelope(identity, "sp_brd_hangup_call", {"cause": 0}, token)
+    assert_android_metadata(packet)
+    return packet
+
+
 def hello(identity: str, identifier: AuthIdentifier, session: Session | None) -> Packet:
     # Fixed handset metadata also replaces obsolete saved implementation labels.
     profile = AndroidProfile()
@@ -249,6 +258,7 @@ def assert_android_metadata(packet: Packet) -> None:
         "sp_srv_override_username": {"token", "code", "username", "model"},
         "sp_srv_update_ack": {"token"},
         "sp_brd_open_door": {"token", "door"},
+        "sp_brd_hangup_call": {"token", "cause"},
     }
     expected_keys = allowed.get(event)
     if expected_keys is None:
@@ -270,6 +280,17 @@ def assert_android_metadata(packet: Packet) -> None:
         type(body["door"]) is not int or not 1 <= body["door"] <= 3
     ):
         raise InvalidInputError("Unsupported Android relay number.")
+    if event == "sp_brd_hangup_call":
+        token = body["token"]
+        assert isinstance(token, str)
+        validate_utf8(token, MAX_CALL_TOKEN_BYTES, "Invalid call token.")
+        if (
+            type(body["cause"]) is not int
+            or body["cause"] != 0
+            or not token.strip()
+            or any(ord(char) < 32 for char in token)
+        ):
+            raise InvalidInputError("Unsupported Android hangup message.")
 
 
 def _assert_identifier_fields(fields: Mapping[str, object]) -> None:

@@ -56,7 +56,7 @@ async def test_startup_push_and_unload_without_sms(
     ) as factory:
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
-        factory.assert_called_once_with(session=session)
+        factory.assert_called_once_with(session=session, auto_hangup=True)
         client.async_connect.assert_awaited_once_with(session)
         client.async_request_verification.assert_not_awaited()
         client.async_release.assert_not_awaited()

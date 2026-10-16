@@ -28,6 +28,7 @@ from ipguard_api.protocol import (
     decode_frames,
     door_inventory,
     envelope,
+    hangup_call,
     hello,
     incoming_call,
     relay_inventory,
@@ -301,7 +302,6 @@ def test_outgoing_request_rejects_unobserved_shapes(event, body):
         ("sp_ps_sip_ring", {"remoteIdentity": "board"}),
         ("sp_ps_ring_ack", {}),
         ("sp_brd_pickup_call", {"media": ["audio"]}),
-        ("sp_brd_hangup_call", {"cause": 0}),
     ],
 )
 def test_outgoing_call_control_is_unsupported(event, body):
@@ -314,6 +314,45 @@ def test_outgoing_call_control_is_unsupported(event, body):
                 "private-call-token",
             )
         )
+
+
+def test_hangup_has_only_original_token_and_numeric_zero_cause():
+    token = "opaque_CLI_Node.js_Home Assistant_å_token"
+    packet = hangup_call("test-installation", token)
+    assert packet["header"]["event"] == "sp_brd_hangup_call"
+    assert packet["header"]["sender"] == "test-installation"
+    assert packet["body"] == {"token": token, "cause": 0}
+    assert type(packet["body"]["cause"]) is int
+    assert_android_metadata(packet)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"cause": True},
+        {"cause": False},
+        {"cause": "0"},
+        {"cause": 0.0},
+        {"cause": 1},
+        {"cause": -1},
+        {"cause": 0, "remoteIdentity": "board"},
+        {"cause": 0, "sdp": "dj0wDQo="},
+    ],
+)
+def test_hangup_rejects_any_other_shape(body):
+    with pytest.raises(InvalidInputError):
+        assert_android_metadata(
+            envelope("test-installation", "sp_brd_hangup_call", body, "call-token")
+        )
+
+
+@pytest.mark.parametrize(
+    "token", [None, False, 0, "", " ", "a\0b", "a\nb", "x" * 1025, "\ud800"]
+)
+def test_hangup_rejects_invalid_call_tokens(token):
+    with pytest.raises(InvalidInputError):
+        hangup_call("test-installation", token)
 
 
 def test_incoming_frame_limits_and_aggregate_bounds():

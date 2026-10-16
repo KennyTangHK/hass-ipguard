@@ -98,7 +98,7 @@ async def test_local_bad_code_does_not_verify_or_resend(
 async def test_complete_flow_masks_code_and_persists_verified_session(
     hass: HomeAssistant, client: Mock, session: Session
 ) -> None:
-    with patch(CLIENT_PATH, return_value=client):
+    with patch(CLIENT_PATH, return_value=client) as factory:
         result = await challenge(hass)
         assert result["step_id"] == "verification"
         selectors = list(result["data_schema"].schema.values())
@@ -108,6 +108,7 @@ async def test_complete_flow_masks_code_and_persists_verified_session(
         )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"] == {CONF_SESSION: session.to_dict()}
+    factory.assert_called_once_with(session=None)
     client.async_request_verification.assert_awaited_once_with(
         "person@example.invalid", "Kenny"
     )
