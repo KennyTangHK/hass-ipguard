@@ -9,7 +9,6 @@ from homeassistant.exceptions import (
     ConfigEntryError,
     ConfigEntryNotReady,
 )
-from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.typing import ConfigType
 
 from .api import (
@@ -33,39 +32,6 @@ from .runtime import (
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Initialize without provider actions or local signalling endpoints."""
-    return True
-
-
-async def async_migrate_entry(hass: HomeAssistant, entry: IpguardConfigEntry) -> bool:
-    """Remove obsolete video configuration while preserving account and entities."""
-    if entry.version != 1:
-        return False
-    if entry.minor_version < 2:
-        obsolete_options = {
-            "video_enabled",
-            "scrypted_url",
-            "ha_url",
-            "companion_credential",
-            "rtsp_url",
-            "verify_ssl",
-        }
-        registry = er.async_get(hass)
-        camera_id = registry.async_get_entity_id(
-            "camera", DOMAIN, f"{entry.entry_id}_incoming_video"
-        )
-        if camera_id is not None:
-            camera = registry.async_get(camera_id)
-            if camera is not None and camera.config_entry_id == entry.entry_id:
-                registry.async_remove(camera_id)
-        hass.config_entries.async_update_entry(
-            entry,
-            options={
-                key: value
-                for key, value in entry.options.items()
-                if key not in obsolete_options
-            },
-            minor_version=2,
-        )
     return True
 
 

@@ -12,7 +12,7 @@ The release ZIP contains the Python SDK. Home Assistant installs the required na
 
 Follow the [HACS installation guide in the main README](../README.md#installation). Search for IPGUARD in the HACS catalogue or use the Open in HACS button, download a release, restart Home Assistant, then add IPGUARD through Devices & services.
 
-Use HACS to download later releases and updates. Your saved account authorization remains in Home Assistant's config-entry storage.
+Use HACS to download later releases and updates. Your saved account authorization remains in Home Assistant's config-entry storage. Release buttons and the incoming-call event are grouped under one IPGUARD device per account.
 
 ## Manual installation
 
@@ -79,11 +79,11 @@ For the test, enable debug logging from **Settings → Devices & services → IP
 
 Carrier-call fallback is controlled by the provider. Automatic refusal is an experiment, not a verified fallback command; there is no supported guarantee of an earlier carrier call.
 
-Upgrading removes the earlier video settings and incoming-video camera while preserving saved account authorization, release buttons and incoming-call event entity IDs. If you installed the IPGUARD Incoming Video plugin in Scrypted, remove that plugin in Scrypted; updating this integration does not uninstall Scrypted or its plugins. Scrypted is no longer used by this integration.
+The integration has no camera entity or Scrypted companion connection. Release buttons and incoming-call notifications do not require a separate media service.
 
 ## Release buttons
 
-Each permitted remote relay appears as a button attached to its intercom board. Use **button.press** in the interface or an automation. You can rename entities in Home Assistant without changing their board/relay identity.
+Each permitted remote relay appears as a button on the account's IPGUARD device, alongside its incoming-call event. Button names include the intercom board and relay so doors remain distinguishable when an account has several boards. Separate accounts have separate devices. Use **button.press** in the interface or an automation, targeting the specific button entity for the intended door. You can rename entities in Home Assistant without changing their board/relay identity.
 
 Buttons become unavailable when the cloud connection is lost, the installation is revoked, the relay disappears or remote release permission is removed. Bluetooth-only and pending-confirmation relays are omitted. Availability does not prove that the physical intercom is online.
 

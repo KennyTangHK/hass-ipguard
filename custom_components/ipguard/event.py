@@ -10,7 +10,12 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .api import IncomingCall
-from .runtime import IpguardConfigEntry, IpguardCoordinator, IpguardRuntimeData
+from .runtime import (
+    IpguardConfigEntry,
+    IpguardCoordinator,
+    IpguardRuntimeData,
+    account_device_info,
+)
 
 
 async def async_setup_entry(
@@ -34,7 +39,7 @@ class IpguardIncomingCallEvent(CoordinatorEntity[IpguardCoordinator], EventEntit
         super().__init__(runtime.coordinator)
         self._runtime = runtime
         self._attr_unique_id = f"{entry.entry_id}_incoming_call"
-        self._attr_translation_placeholders = {"account": entry.title}
+        self._attr_device_info = account_device_info(entry)
 
     @property
     def available(self) -> bool:

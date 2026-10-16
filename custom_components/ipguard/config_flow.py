@@ -94,7 +94,6 @@ class IpguardConfigFlow(ConfigFlow, domain=DOMAIN):
     """Maintain one explicit enrollment challenge until completion or cancellation."""
 
     VERSION = 1
-    MINOR_VERSION = 2
 
     def __init__(self) -> None:
         self._client: IpguardClient | None = None

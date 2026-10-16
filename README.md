@@ -5,7 +5,7 @@
 [![Home Assistant integration](https://img.shields.io/badge/Home%20Assistant-Integration-41BDF5.svg)](https://www.home-assistant.io/)
 [![Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-Receive incoming intercom calls as Home Assistant doorbell events and open your building's entrance using your existing IPGUARD account. Each permitted remote relay appears as a button on its intercom device.
+Receive incoming intercom calls as Home Assistant doorbell events and open your building's entrance using your existing IPGUARD account. Release buttons and the incoming-call event share one IPGUARD device for each configured account.
 
 > **Beta:** this integration is intended for testing and is not a stable release.
 
@@ -20,7 +20,7 @@ Use it lawfully, only with your own authorized account and buildings or doors yo
 ## Features
 
 - Incoming call doorbell events over the existing cloud connection.
-- Cloud release buttons for permitted relays, grouped by intercom board.
+- One device per account, grouping the incoming-call event and all permitted cloud release buttons.
 - Guided setup with phone or email verification and explicit consent before replacing a mobile installation.
 - Saved authorization across restarts, automatic reconnection, and availability updates when access changes.
 - One transmission per press; uncertain results are never automatically retried.
@@ -71,7 +71,7 @@ If an existing mobile installation is detected, setup asks separately whether to
 
 ## Using the integration
 
-Add a release button to a dashboard or call `button.press` in an automation. Buttons become unavailable when the cloud connection is lost or release permission is removed. An account without eligible remote relays can finish setup without creating buttons.
+Add a release button to a dashboard or call `button.press` in an automation. Button names identify the intercom board and relay. Buttons become unavailable when the cloud connection is lost or release permission is removed. An account without eligible remote relays can finish setup without creating buttons.
 
 Each account also has an **incoming call** doorbell event entity. Use its **Ring** trigger to create notifications or other automations; see the [doorbell automation example](docs/USAGE.md#incoming-call-notifications). Known callers include board and site details. Call delivery with an empty mobile push token still needs confirmation on your account.
 

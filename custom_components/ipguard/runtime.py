@@ -9,6 +9,7 @@ from time import monotonic
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .api import ClientSnapshot, IncomingCall, IpguardClient, Relay, Session
@@ -139,6 +140,16 @@ class IpguardRuntimeData:
 
 
 type IpguardConfigEntry = ConfigEntry[IpguardRuntimeData]
+
+
+def account_device_info(entry: ConfigEntry) -> dr.DeviceInfo:
+    """Group the account's controls and doorbell without sharing other accounts."""
+    return dr.DeviceInfo(
+        identifiers={(DOMAIN, entry.entry_id)},
+        name=entry.title,
+        manufacturer="Noralsy",
+        entry_type=dr.DeviceEntryType.SERVICE,
+    )
 
 
 def persist_session(hass: HomeAssistant, entry: ConfigEntry, session: Session) -> None:

@@ -61,12 +61,12 @@
   "entity": {
     "button": {
       "release": {
-        "name": "Release {relay}"
+        "name": "Release {relay} ({board})"
       }
     },
     "event": {
       "incoming_call": {
-        "name": "{account} incoming call"
+        "name": "Incoming call"
       }
     }
   },

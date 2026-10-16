@@ -14,6 +14,7 @@ from homeassistant.const import (
     STATE_UNKNOWN,
 )
 from homeassistant.core import Event, HomeAssistant, ServiceCall, State, callback
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
 from ipguard_api import (
@@ -89,7 +90,8 @@ async def test_doorbell_ring_runs_standard_automation_with_auto_hangup_enabled(
         assert state.attributes["event_types"] == [DoorbellEventType.RING]
         registry_entry = er.async_get(hass).async_get(entity_id)
         assert registry_entry.unique_id == f"{entry.entry_id}_incoming_call"
-        assert registry_entry.device_id is None
+        device = dr.async_get(hass).async_get(registry_entry.device_id)
+        assert device.identifiers == {(DOMAIN, entry.entry_id)}
         action = Mock()
         await setup_ring_automation(hass, entity_id, action)
         board = replace(relay.board, site_id="known-site", site_name="Known site")

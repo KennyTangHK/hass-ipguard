@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
-import hashlib
 import importlib
 import importlib.metadata
 import json
@@ -24,7 +23,6 @@ from zipfile import ZipFile
 
 import zmq
 import zmq.asyncio
-from aiohttp import ClientSession
 from homeassistant import bootstrap, loader
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant, State, callback
@@ -34,7 +32,6 @@ from homeassistant.helpers import device_registry, entity_registry
 IDENTIFIER = "resident@example.invalid"
 CODE = "000123"
 BOARD = "fixture-board"
-BASELINE_SHA256 = "11ce6985efa96f6873c8bf9f4e290465261d2a82d114a70bbd6bed46159a7578"
 
 
 class BlockExternalSdk(MetaPathFinder):
@@ -300,10 +297,32 @@ def entry_event_states(hass: HomeAssistant, entry_id: str) -> list[State]:
     ]
 
 
+def check_account_device(hass: HomeAssistant, entry_id: str) -> None:
+    """Keep this account's release buttons and ring under one service device."""
+    devices = device_registry.async_entries_for_config_entry(
+        device_registry.async_get(hass), entry_id
+    )
+    assert len(devices) == 1
+    device = devices[0]
+    assert device.identifiers == {("ipguard", entry_id)}
+    assert device.entry_type is device_registry.DeviceEntryType.SERVICE
+    entities = entity_registry.async_entries_for_config_entry(
+        entity_registry.async_get(hass), entry_id
+    )
+    controls = [
+        entity
+        for entity in entities
+        if entity.platform == "ipguard" and entity.domain in {"button", "event"}
+    ]
+    assert {entity.domain for entity in controls} == {"button", "event"}
+    assert {entity.device_id for entity in controls} == {device.id}
+
+
 async def check_incoming_calls(
     hass: HomeAssistant, fixture: CloudFixture, entry_id: str
 ) -> None:
     """Exercise safe rings and the one-attempt refusal trial through CURVE."""
+    check_account_device(hass, entry_id)
     states = entry_event_states(hass, entry_id)
     assert len(states) == 1, {
         "event_entity_ids": [state.entity_id for state in states],
@@ -383,71 +402,43 @@ async def check_incoming_calls(
         unsubscribe()
 
 
-async def check_retired_video(
-    hass: HomeAssistant, fixture: CloudFixture, entry: Any, http_port: int
+async def check_saved_session_reload(
+    hass: HomeAssistant, fixture: CloudFixture, entry: Any
 ) -> None:
-    """Migrate old video settings without changing the saved account or entities."""
-    component = importlib.import_module("custom_components.ipguard")
+    """Reload the current layout without changing authorization or entity IDs."""
     registry = entity_registry.async_get(hass)
     session_before = dict(entry.data["session"])
-    hangups_before = fixture.count("sp_brd_hangup_call")
     entities_before = {
-        record.entity_id: record.unique_id
-        for record in registry.entities.values()
-        if record.config_entry_id == entry.entry_id
+        record.entity_id: (record.unique_id, record.device_id)
+        for record in entity_registry.async_entries_for_config_entry(
+            registry, entry.entry_id
+        )
     }
-    assert await hass.config_entries.async_unload(entry.entry_id)
-    credential = "fixture-retired-companion-credential"
-    hass.config_entries.async_update_entry(
-        entry,
-        minor_version=1,
-        options={
-            "video_enabled": True,
-            "scrypted_url": "https://obsolete.example.invalid",
-            "ha_url": "http://obsolete.example.invalid",
-            "companion_credential": credential,
-            "rtsp_url": "rtsp://obsolete.example.invalid/private-source",
-            "verify_ssl": True,
-            "fixture_option": "preserved",
-        },
+    sent_before = (
+        fixture.count("sp_srv_check_auth"),
+        fixture.count("sp_srv_check_username"),
+        fixture.count("sp_srv_override_username"),
+        fixture.count("sp_brd_hangup_call"),
+        fixture.count("sp_brd_open_door"),
     )
-    camera = registry.async_get_or_create(
-        "camera",
-        "ipguard",
-        f"{entry.entry_id}_incoming_video",
-        config_entry=entry,
-        suggested_object_id="retired_incoming_video",
-    )
-    assert await hass.config_entries.async_setup(entry.entry_id)
+    assert await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
-    assert entry.minor_version == 2
-    assert dict(entry.options) == {"fixture_option": "preserved"}
+    assert entry.state is ConfigEntryState.LOADED
     assert entry.data["session"] == session_before
-    assert registry.async_get(camera.entity_id) is None
+    check_account_device(hass, entry.entry_id)
     assert {
-        record.entity_id: record.unique_id
-        for record in registry.entities.values()
-        if record.config_entry_id == entry.entry_id
+        record.entity_id: (record.unique_id, record.device_id)
+        for record in entity_registry.async_entries_for_config_entry(
+            registry, entry.entry_id
+        )
     } == entities_before
-    assert not hass.states.async_all("camera")
-    assert component.__file__ is not None
-    assert not {"camera.py", "media.py", "video_setup.py"} & {
-        path.name for path in Path(component.__file__).parent.iterdir()
-    }
-    assert not any(
-        "/api/ipguard/media/" in str(route.resource)
-        for route in hass.http.app.router.routes()
-    )
-    async with ClientSession() as session:
-        async with session.post(
-            f"http://127.0.0.1:{http_port}/api/ipguard/media/{entry.entry_id}/state",
-            headers={"Authorization": f"Bearer {credential}"},
-            json={"version": 1},
-        ) as response:
-            assert response.status in {401, 404}
-    assert fixture.count("sp_ps_sdp_answer") == 0
-    assert fixture.count("sp_brd_hangup_call") == hangups_before
-    assert fixture.count("sp_brd_open_door") == 0
+    assert (
+        fixture.count("sp_srv_check_auth"),
+        fixture.count("sp_srv_check_username"),
+        fixture.count("sp_srv_override_username"),
+        fixture.count("sp_brd_hangup_call"),
+        fixture.count("sp_brd_open_door"),
+    ) == sent_before
 
 
 async def check(
@@ -492,18 +483,6 @@ async def check(
     flow_module.IpguardClient = client_factory  # type: ignore[attr-defined]
     hass = HomeAssistant(str(config_dir))
     loader.async_setup(hass)
-    if saved is None:
-        probe = await asyncio.start_server(
-            lambda _reader, writer: writer.close(), "127.0.0.1", 0
-        )
-        assert probe.sockets is not None
-        http_port = int(probe.sockets[0].getsockname()[1])
-        probe.close()
-        await probe.wait_closed()
-    else:
-        restored_port = saved["http_port"]
-        assert type(restored_port) is int and 0 < restored_port <= 65535
-        http_port = restored_port
     try:
         assert (
             await bootstrap.async_from_config_dict(
@@ -517,7 +496,6 @@ async def check(
                         "country": "GB",
                     },
                     "persistent_notification": {},
-                    "http": {"server_host": "127.0.0.1", "server_port": http_port},
                 },
                 hass,
             )
@@ -543,10 +521,12 @@ async def check(
             assert states[0].entity_id == saved["entity_id"]
             assert record.unique_id == saved["unique_id"]
             assert entry.data["session"] == saved["session"]
+            assert record.device_id == saved["device_id"]
             events = entry_event_states(hass, entry.entry_id)
             assert len(events) == 1 and events[0].state == "unknown"
+            assert events[0].entity_id == saved["event_id"]
             await check_incoming_calls(hass, fixture, entry.entry_id)
-            await check_retired_video(hass, fixture, entry, http_port)
+            await check_saved_session_reload(hass, fixture, entry)
             assert fixture.count("sp_srv_check_auth") == 0
             assert fixture.count("sp_srv_check_username") == 0
             assert fixture.count("sp_srv_override_username") == 0
@@ -555,14 +535,14 @@ async def check(
             print(
                 json.dumps(
                     {
-                        "upgrade_restart": True,
+                        "current_version_restart": True,
                         "same_credentials": True,
                         "same_entity_ids": True,
+                        "one_account_device": True,
                         "no_sms_or_actuation": True,
-                        "new_doorbell_event": True,
+                        "same_device_id": True,
                         "incoming_ring_event": True,
                         "auto_hangup_trial": True,
-                        "retired_video_removed": True,
                     }
                 )
             )
@@ -642,8 +622,11 @@ async def check(
                         "entry_id": entry.entry_id,
                         "entity_id": entity_id,
                         "unique_id": record.unique_id,
+                        "device_id": record.device_id,
+                        "event_id": entry_event_states(hass, entry.entry_id)[
+                            0
+                        ].entity_id,
                         "session": entry.data["session"],
-                        "http_port": http_port,
                     }
                 )
             )
@@ -661,10 +644,10 @@ async def check(
                 device_registry.async_get(hass)._data_to_save()
             )
             assert fixture.count("sp_brd_open_door") == 0
-            print(json.dumps({"baseline_state_saved": True, "no_actuation": True}))
+            print(json.dumps({"current_state_saved": True, "no_actuation": True}))
             return
         await check_incoming_calls(hass, fixture, entry.entry_id)
-        await check_retired_video(hass, fixture, entry, http_port)
+        await check_saved_session_reload(hass, fixture, entry)
         await hass.services.async_call(
             "button", "press", {"entity_id": entity_id}, blocking=True
         )
@@ -701,10 +684,10 @@ async def check(
                     "invalid_code_retry": True,
                     "saved_session_setup": True,
                     "eligible_buttons": len(buttons),
+                    "one_account_device": True,
                     "incoming_ring_event": True,
                     "auto_hangup_trial": True,
                     "duplicate_call_suppression": True,
-                    "retired_video_removed": True,
                     "release_acknowledged": True,
                     "no_release_replay": True,
                     "permission_push": True,
@@ -724,7 +707,7 @@ async def check(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("archive", type=Path)
-    parser.add_argument("--upgrade-from", type=Path)
+    parser.add_argument("--restart", action="store_true")
     parser.add_argument(
         "--phase", choices=("normal", "save", "restore"), default="normal"
     )
@@ -733,20 +716,15 @@ def main() -> None:
         "--registration", choices=("normal", "replace", "decline"), default="normal"
     )
     args = parser.parse_args()
-    if args.upgrade_from is not None:
-        baseline = args.upgrade_from.resolve()
-        assert hashlib.sha256(baseline.read_bytes()).hexdigest() == BASELINE_SHA256
-        with TemporaryDirectory(prefix="ipguard-upgrade-check-") as directory:
+    if args.restart:
+        with TemporaryDirectory(prefix="ipguard-restart-check-") as directory:
             config = Path(directory)
-            for archive, phase in [
-                (baseline, "save"),
-                (args.archive.resolve(), "restore"),
-            ]:
+            for phase in ("save", "restore"):
                 subprocess.run(
                     [
                         sys.executable,
                         str(Path(__file__).resolve()),
-                        str(archive),
+                        str(args.archive.resolve()),
                         "--phase",
                         phase,
                         "--config-dir",

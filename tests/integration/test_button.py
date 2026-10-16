@@ -23,7 +23,7 @@ def make_button(
     coordinator = IpguardCoordinator(hass, entry)
     coordinator.receive(ClientSnapshot((relay,), True, session=session))
     runtime = IpguardRuntimeData(client, coordinator)
-    button = IpguardReleaseButton(entry.entry_id, runtime, relay)
+    button = IpguardReleaseButton(entry, runtime, relay)
     button.hass = hass
     return button
 

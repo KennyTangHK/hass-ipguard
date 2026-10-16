@@ -12,6 +12,6 @@
     "ipguard_api",
     "custom_components.ipguard._vendor.ipguard_api"
   ],
-  "requirements": ["ipguard-api==0.1.0b5"],
+  "requirements": ["ipguard-api==0.1.0b6"],
   "version": "0.1.0b4"
 }

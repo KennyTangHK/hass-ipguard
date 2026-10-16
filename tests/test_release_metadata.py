@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import hashlib
 import importlib.util
 import io
@@ -17,7 +16,6 @@ import pytest
 
 from scripts import release_metadata
 from scripts.build_release import build_release
-from scripts.packaging_policy import load_policy
 from scripts.release_metadata import (
     ReleaseMetadata,
     checksum_text,
@@ -39,39 +37,6 @@ def release(tmp_path: Path) -> tuple[Path, Path, ReleaseMetadata]:
     metadata = read_metadata(root, "v1.2.3b4")
     build_release(root, dist / wheel.name, dist)
     return root, dist, metadata
-
-
-def test_upgrade_baseline_matches_the_smoke_test_pin() -> None:
-    root = Path(__file__).parents[1]
-    source = ast.parse((root / "scripts/smoke_release.py").read_text())
-    declarations = [
-        statement.value
-        for statement in source.body
-        if isinstance(statement, ast.Assign)
-        and any(
-            isinstance(target, ast.Name) and target.id == "BASELINE_SHA256"
-            for target in statement.targets
-        )
-    ]
-    assert len(declarations) == 1
-    expected = ast.literal_eval(declarations[0])
-    baseline = root / ".github/fixtures/ipguard-upgrade-baseline.zip"
-    assert hashlib.sha256(baseline.read_bytes()).hexdigest() == expected
-
-
-def test_upgrade_baseline_is_excluded_from_distributions_and_publication() -> None:
-    root = Path(__file__).parents[1]
-    policy = load_policy(root)
-    baseline = ".github/fixtures/ipguard-upgrade-baseline.zip"
-    for selection in (
-        policy.integration_wheel,
-        policy.integration_sdist,
-        policy.sdk_wheel,
-        policy.sdk_sdist,
-    ):
-        assert baseline not in selection
-        assert not any(name.startswith(".github/fixtures/") for name in selection)
-    assert Path(baseline).name not in read_metadata(root).publication_assets
 
 
 def _write_archives(

@@ -3,7 +3,6 @@
 from homeassistant.components.button import ButtonEntity
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -20,6 +19,7 @@ from .runtime import (
     IpguardCoordinator,
     IpguardRuntimeData,
     RelayKey,
+    account_device_info,
 )
 
 
@@ -40,7 +40,7 @@ async def async_setup_entry(
             if key in known or not relay.remote_allowed or relay.pending_confirmation:
                 continue
             known.add(key)
-            new_entities.append(IpguardReleaseButton(entry.entry_id, runtime, relay))
+            new_entities.append(IpguardReleaseButton(entry, runtime, relay))
         if new_entities:
             async_add_entities(new_entities)
 
@@ -55,21 +55,18 @@ class IpguardReleaseButton(CoordinatorEntity[IpguardCoordinator], ButtonEntity):
     _attr_translation_key = "release"
 
     def __init__(
-        self, entry_id: str, runtime: IpguardRuntimeData, relay: Relay
+        self, entry: IpguardConfigEntry, runtime: IpguardRuntimeData, relay: Relay
     ) -> None:
         key = (relay.board.identity, relay.number)
         super().__init__(runtime.coordinator, context=key)
         self._runtime = runtime
         self._key = key
-        self._attr_unique_id = f"{entry_id}_{key[0]}_{key[1]}_release"
+        self._attr_unique_id = f"{entry.entry_id}_{key[0]}_{key[1]}_release"
         self._attr_translation_placeholders = {
-            "relay": relay.name or f"Relay {relay.number}"
+            "relay": relay.name or f"Relay {relay.number}",
+            "board": relay.board.name or relay.board.identity,
         }
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, relay.board.identity)},
-            manufacturer="Noralsy",
-            name=relay.board.name or None,
-        )
+        self._attr_device_info = account_device_info(entry)
 
     @property
     def available(self) -> bool:

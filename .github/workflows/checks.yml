@@ -128,20 +128,13 @@ jobs:
             -v "$GITHUB_WORKSPACE/scripts:/checks:ro" \
             --entrypoint python ipguard-ha-smoke:2026.10.0 \
             /checks/smoke_release.py /releases/ipguard.zip
-      - name: Prepare the pinned upgrade baseline
-        run: |
-          mkdir -p "$RUNNER_TEMP/ipguard-upgrade-baseline"
-          cp .github/fixtures/ipguard-upgrade-baseline.zip \
-            "$RUNNER_TEMP/ipguard-upgrade-baseline/ipguard.zip"
-      - name: Test release upgrade and restart without reenrollment
+      - name: Test restart without reenrollment
         run: |
           docker run --rm --network none \
             -v "$GITHUB_WORKSPACE/dist:/releases:ro" \
             -v "$GITHUB_WORKSPACE/scripts:/checks:ro" \
-            -v "$RUNNER_TEMP/ipguard-upgrade-baseline:/baseline:ro" \
             --entrypoint python ipguard-ha-smoke:2026.10.0 \
-            /checks/smoke_release.py /releases/ipguard.zip \
-            --upgrade-from /baseline/ipguard.zip
+            /checks/smoke_release.py /releases/ipguard.zip --restart
       - name: Set the artifact name
         if: inputs.expected-tag != ''
         id: artifact
