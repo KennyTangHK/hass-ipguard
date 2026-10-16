@@ -19,6 +19,10 @@ from .runtime import IpguardConfigEntry, IpguardCoordinator, IpguardRuntimeData
 _PLACEHOLDER = b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
+_LOGGER = logging.getLogger(__name__)
+_MEDIA_STATES = frozenset(
+    {"disabled", "idle", "pending", "starting", "answer_sent", "streaming", "ended"}
+)
 
 
 class _MediaLogFilter(logging.Filter):
@@ -118,6 +122,16 @@ class IpguardIncomingCamera(CoordinatorEntity[IpguardCoordinator], Camera):
 
     async def stream_source(self) -> str | None:
         """Read the cached RTSP source without claiming or answering a call."""
+        state = self._bridge.snapshot.state
+        _LOGGER.debug(
+            "IPGUARD video source requested cloud_connected=%s closing=%s "
+            "bridge_active=%s companion_connected=%s media_state=%s",
+            bool(self.coordinator.connected),
+            bool(self._runtime.closing),
+            bool(self._bridge.active),
+            bool(self._bridge.streams),
+            state if state in _MEDIA_STATES else "unknown",
+        )
         if not self.available:
             return None
         return self._bridge.source
@@ -127,8 +141,10 @@ class IpguardIncomingCamera(CoordinatorEntity[IpguardCoordinator], Camera):
 
     async def async_create_stream(self) -> Stream | None:
         """Wrap the owned framework worker before it can open the RTSP source."""
+        _LOGGER.debug("IPGUARD video playback requested")
         stream = await super().async_create_stream()
         if stream is None or stream is self._guarded_stream:
+            _LOGGER.debug("IPGUARD video playback stream_ready=%s", stream is not None)
             return stream
         worker = stream._run_worker
 
@@ -138,6 +154,7 @@ class IpguardIncomingCamera(CoordinatorEntity[IpguardCoordinator], Camera):
         worker_attribute = "_run_worker"
         setattr(stream, worker_attribute, guarded_worker)
         self._guarded_stream = stream
+        _LOGGER.debug("IPGUARD video playback stream_ready=True")
         return stream
 
     async def async_will_remove_from_hass(self) -> None:

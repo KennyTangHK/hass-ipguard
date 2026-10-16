@@ -325,18 +325,34 @@ async def test_native_rtsp_verbose_sdp_is_private_to_owned_worker(
         await server.wait_closed()
 
 
+@pytest.mark.parametrize("state", ["idle", SDP + TOKEN + CALL])
 async def test_camera_unavailable_without_waiting_for_a_future_call(
-    hass: HomeAssistant, client: Mock, session: Session
+    hass: HomeAssistant,
+    client: Mock,
+    session: Session,
+    state: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.DEBUG, logger="custom_components.ipguard")
     entry = entry_for(hass, session)
-    bridge = MediaBridge(client, TOKEN, SOURCE, MediaSnapshot("idle"))
+    bridge = MediaBridge(client, TOKEN, SOURCE, MediaSnapshot(state))
     runtime = IpguardRuntimeData(client, IpguardCoordinator(hass, entry), media=bridge)
     runtime.coordinator.connected = True
     camera = IpguardIncomingCamera(entry.entry_id, runtime, bridge)
     camera.hass = hass
     assert not camera.available
     assert await camera.stream_source() is None
+    assert await camera.async_create_stream() is None
     assert await camera.async_camera_image()
+    expected_state = "idle" if state == "idle" else "unknown"
+    assert any(
+        f"companion_connected=False media_state={expected_state}" in message
+        for message in caplog.messages
+    )
+    assert "IPGUARD video playback stream_ready=False" in caplog.messages
+    assert all(
+        secret not in caplog.text for secret in (TOKEN, SOURCE, SDP, CALL, CLAIM)
+    )
 
 
 async def test_http_bridge_scope_state_and_operations(
@@ -447,8 +463,13 @@ async def test_bridge_errors_and_oversized_bodies_are_sanitized(
 
 
 async def test_events_push_state_without_media_and_close_on_unload(
-    hass: HomeAssistant, hass_client, client: Mock, session: Session
+    hass: HomeAssistant,
+    hass_client,
+    client: Mock,
+    session: Session,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.DEBUG, logger="custom_components.ipguard")
     configure_media(client)
     entry = entry_for(hass, session)
     with patch("custom_components.ipguard.IpguardClient", return_value=client):
@@ -467,6 +488,11 @@ async def test_events_push_state_without_media_and_close_on_unload(
         assert await hass.config_entries.async_unload(entry.entry_id)
         assert (await stream.receive()).type in {WSMsgType.CLOSE, WSMsgType.CLOSED}
         assert not bridge.streams, (len(bridge.handlers), len(bridge.closers))
+        assert "IPGUARD video companion connected" in caplog.messages
+        assert "IPGUARD video companion disconnected" in caplog.messages
+        assert all(
+            secret not in caplog.text for secret in (TOKEN, SOURCE, SDP, CALL, CLAIM)
+        )
 
 
 @pytest.mark.parametrize("state", ["pending", "starting", "answer_sent", "streaming"])

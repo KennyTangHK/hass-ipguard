@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -30,6 +31,7 @@ _MAX_SDP = 65_536
 _PAIR_SECONDS = 60
 _ACTIVE_STATES = frozenset({"pending", "starting", "answer_sent", "streaming"})
 _MANAGER_KEY = "media_manager"
+_LOGGER = logging.getLogger(__name__)
 
 
 class CompanionError(Exception):
@@ -489,10 +491,13 @@ class MediaView(HomeAssistantView):
                 if bridge.active_claim == (value["call_id"], value["claim_id"]):
                     bridge.active_claim = None
         except MediaUnavailableError:
+            _LOGGER.debug("IPGUARD video operation=%s unavailable", operation)
             return error_response("unavailable", 409)
         except IpguardError:
+            _LOGGER.debug("IPGUARD video operation=%s failed", operation)
             return error_response("media_failed", 502)
         except Exception:
+            _LOGGER.debug("IPGUARD video operation=%s failed", operation)
             return error_response("media_failed", 502)
         return web.json_response({"version": BRIDGE_VERSION, "ok": True})
 
@@ -525,6 +530,7 @@ class MediaEventsView(HomeAssistantView):
             bridge.connecting = False
         queue: asyncio.Queue[dict[str, object]] = asyncio.Queue(maxsize=1)
         bridge.streams[stream] = queue
+        _LOGGER.debug("IPGUARD video companion connected")
         bridge.connection_changed()
         if not bridge.active:
             await stream.close()
@@ -551,6 +557,8 @@ class MediaEventsView(HomeAssistantView):
         finally:
             sender.cancel()
             owned = bridge.streams.pop(stream, None) is not None
+            if owned:
+                _LOGGER.debug("IPGUARD video companion disconnected")
             if owned and not bridge.streams and bridge.active_claim is not None:
                 claim, bridge.active_claim = bridge.active_claim, None
                 bridge.client.end_media(*claim)

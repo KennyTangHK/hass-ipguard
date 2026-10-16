@@ -103,7 +103,21 @@ A matching acknowledgement confirms that the board acknowledged the command. It 
 - **Unknown release outcome:** there was no matching acknowledgement. Do not assume the command failed or that the door is closed.
 - **Dependency installation failed:** verify PyPI access and a supported Python/architecture. The generated bundle includes the SDK but relies on the native PyZMQ dependency.
 
-To enable sanitized protocol logs temporarily, add this to your existing Home Assistant logging configuration and restart:
+For an incoming-video problem, open the integration's menu under **Settings → Devices & services → IPGUARD** and choose **Enable debug logging**. Reproduce one fresh ring and explicitly open its live stream. Choose **Disable debug logging** afterwards to download the capture. In **Settings → System → Logs**, select Home Assistant Core and show raw logs to include debug entries.
+
+You can also enable only these loggers immediately through **Developer tools → Actions**:
+
+```yaml
+action: logger.set_level
+data:
+  custom_components.ipguard: debug
+  ipguard_api: debug
+  custom_components.ipguard._vendor.ipguard_api: debug
+```
+
+The video logs show companion connection/disconnection, SDK call states, expiry and the local answer transmission result. `answer outcome=sent` means a local write, not provider acceptance. In Scrypted, open the IPGUARD camera's **Console** for receiving/RTSP progress, or its settings for the latest safe video status. A black thumbnail is the passive placeholder; test an explicit live stream during a new ring.
+
+To keep sanitized protocol logging enabled across restarts, add this to your existing Home Assistant logging configuration:
 
 ```yaml
 logger:

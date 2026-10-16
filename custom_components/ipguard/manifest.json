@@ -8,7 +8,11 @@
   "documentation": "https://github.com/KennyTangHK/hass-ipguard/blob/master/docs/USAGE.md",
   "issue_tracker": "https://github.com/KennyTangHK/hass-ipguard/issues",
   "iot_class": "cloud_push",
-  "loggers": ["ipguard_api"],
+  "loggers": [
+    "custom_components.ipguard",
+    "ipguard_api",
+    "custom_components.ipguard._vendor.ipguard_api"
+  ],
   "requirements": ["ipguard-api==0.1.0b4"],
   "version": "0.1.0b4"
 }

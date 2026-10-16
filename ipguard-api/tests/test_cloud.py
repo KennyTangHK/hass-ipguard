@@ -1358,6 +1358,10 @@ async def test_media_opt_in_retains_offer_before_safe_ring_and_answers_once(
         assert client.media_snapshot.state == "answer_sent"
         client.mark_media_streaming(claim.call_id, claim.claim_id)
         assert client.media_snapshot.state == "streaming"
+        for state in ("idle", "pending", "starting", "answer_sent", "streaming"):
+            assert f"IPGUARD video state={state}" in caplog.messages
+        assert caplog.messages.count("IPGUARD video answer transmission started") == 1
+        assert caplog.messages.count("IPGUARD video answer outcome=sent") == 1
         private = repr(claim) + repr(snapshot) + repr(client._media_call) + caplog.text
         for secret in (
             claim.call_id,
@@ -1484,8 +1488,9 @@ async def test_media_transport_replacement_preserves_ring_dedup_only(cloud):
     "invalidate", ["terminate", "replace", "disable", "disconnect"]
 )
 async def test_media_answer_guard_rejects_state_change_before_send(
-    cloud, monkeypatch, invalidate
+    cloud, monkeypatch, invalidate, caplog
 ):
+    caplog.set_level(logging.DEBUG, logger="ipguard_api")
     async with cloud.client() as client:
         client.set_media_enabled(True)
         await client.async_connect(cloud.saved_session())
@@ -1520,11 +1525,14 @@ async def test_media_answer_guard_rejects_state_change_before_send(
             )
         assert not client._media_answer_outcomes
         assert cloud.events() == ["hello"]
+        assert "IPGUARD video answer rejected before transmission" in caplog.messages
+        assert "IPGUARD video answer transmission started" not in caplog.messages
 
 
 async def test_media_uncertain_answer_is_terminal_and_not_replayed(
     cloud, monkeypatch, caplog
 ):
+    caplog.set_level(logging.DEBUG, logger="ipguard_api")
     async with cloud.client() as client:
         client.set_media_enabled(True)
         await client.async_connect(cloud.saved_session())
@@ -1554,6 +1562,10 @@ async def test_media_uncertain_answer_is_terminal_and_not_replayed(
         )
         assert calls == [1] and "private-transmission-error" not in caplog.text
         assert cloud.events() == ["hello"]
+        assert caplog.messages.count("IPGUARD video answer transmission started") == 1
+        assert caplog.messages.count("IPGUARD video answer outcome=uncertain") == 1
+        assert "IPGUARD video state=ended" in caplog.messages
+        assert claim.call_id not in caplog.text and claim.claim_id not in caplog.text
 
 
 async def test_media_startup_retention_is_cleared_by_failed_readiness(cloud):

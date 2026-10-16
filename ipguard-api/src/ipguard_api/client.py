@@ -227,6 +227,17 @@ class IpguardClient:
         return lambda: self._media_listeners.discard(callback)
 
     def _notify_media(self) -> None:
+        state = self._media_snapshot.state
+        if state in {
+            "disabled",
+            "idle",
+            "pending",
+            "starting",
+            "answer_sent",
+            "streaming",
+            "ended",
+        }:
+            _LOGGER.debug("IPGUARD video state=%s", state)
         for callback in tuple(self._media_listeners):
             try:
                 callback(self._media_snapshot)
@@ -254,6 +265,7 @@ class IpguardClient:
 
     def _expire_media(self) -> None:
         if self._media_call is not None and self._media_call.expires_at <= monotonic():
+            _LOGGER.debug("IPGUARD video call expired")
             self._finish_media()
 
     def _schedule_media_expiry(self, call: _MediaCall) -> None:
@@ -290,6 +302,8 @@ class IpguardClient:
 
     def _remember_media_answer(self, call_id: str, claim_id: str, result: str) -> None:
         self._media_answer_outcomes[(call_id, claim_id)] = result
+        if result in {"sent", "uncertain"}:
+            _LOGGER.debug("IPGUARD video answer outcome=%s", result)
         if len(self._media_answer_outcomes) > MAX_RECENT_CALLS:
             self._media_answer_outcomes.popitem(last=False)
 
@@ -319,6 +333,7 @@ class IpguardClient:
                         "The media call is no longer available."
                     )
                 attempted = True
+                _LOGGER.debug("IPGUARD video answer transmission started")
 
             try:
                 await call.transport.async_send(
@@ -336,6 +351,7 @@ class IpguardClient:
                     if self._media_call is call:
                         self._finish_media()
                     return "uncertain"
+                _LOGGER.debug("IPGUARD video answer rejected before transmission")
                 raise MediaUnavailableError("The media answer was not sent.") from None
             self._remember_media_answer(call_id, claim_id, "sent")
             if self._media_call is call:
@@ -358,6 +374,7 @@ class IpguardClient:
         """End a receiver claim locally; never send a provider hangup."""
         call = self._media_call
         if call is not None and call.call_id == call_id and call.claim_id == claim_id:
+            _LOGGER.debug("IPGUARD video receiver closed locally")
             self._finish_media()
 
     def _notify(self) -> None:
@@ -770,6 +787,7 @@ class IpguardClient:
             ):
                 return
             if event in {"ps_sp_hangup_call", "brd_sp_hangup_call"}:
+                _LOGGER.debug("IPGUARD video provider termination received")
                 self._finish_media()
             # A ring acknowledgement does not prove local media readiness.
             return
@@ -802,6 +820,8 @@ class IpguardClient:
         if len(self._call_tokens) > MAX_RECENT_CALLS:
             self._call_tokens.popitem(last=False)
         if self._media_enabled:
+            if self._media_call is not None:
+                _LOGGER.debug("IPGUARD video call superseded")
             self._finish_media()
             self._media_call = media = _MediaCall(
                 parsed,
