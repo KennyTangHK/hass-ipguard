@@ -13,7 +13,6 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .api import ClientSnapshot, IncomingCall, IpguardClient, Relay, Session
 from .const import CONF_SESSION, DOMAIN
-from .media import MediaBridge
 
 _LOGGER = logging.getLogger(__name__)
 type RelayKey = tuple[str, int]
@@ -62,12 +61,10 @@ class IpguardRuntimeData:
     reauth_started: bool = False
     closing: bool = False
     close_task: asyncio.Task[None] | None = field(default=None, repr=False)
-    media: MediaBridge | None = field(default=None, repr=False)
-    unregister_media: Callable[[], None] | None = field(default=None, repr=False)
 
     @callback
     def receive_call(self, call: IncomingCall) -> None:
-        """Deliver live sanitized offers or buffer brief startup/readiness gaps."""
+        """Deliver sanitized rings or buffer brief startup/readiness gaps."""
         if self.closing or self.reauth_started:
             return
         if self.call_listener is not None:
@@ -137,16 +134,7 @@ class IpguardRuntimeData:
             if self.unsubscribe_calls is not None:
                 self.unsubscribe_calls()
                 self.unsubscribe_calls = None
-            if self.unregister_media is not None:
-                self.unregister_media()
-                self.unregister_media = None
-
-            async def close() -> None:
-                if self.media is not None:
-                    await self.media.async_close()
-                await self.client.async_close()
-
-            self.close_task = asyncio.create_task(close())
+            self.close_task = asyncio.create_task(self.client.async_close())
         await asyncio.shield(self.close_task)
 
 

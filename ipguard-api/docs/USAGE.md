@@ -71,27 +71,13 @@ async def listen(saved_data, stop):
             unsubscribe()
 ```
 
-`IncomingCall` contains only an optional `Board` matched by exact identity against the latest cached inventory. Unknown or ambiguous callers still produce a callback with `board=None`. Optional board/site labels and the site identity are omitted if malformed, contain control characters or exceed 256 UTF-8 bytes. Call tokens, routing senders, SDP and media credentials are not exposed or retained in callback data. Offers must come from the current authenticated transport for an activated installation; malformed offers are ignored without interrupting relay updates.
+`IncomingCall` contains only an optional `Board` matched by exact identity against the latest cached inventory. Unknown or ambiguous callers still produce a callback with `board=None`. Optional board/site labels and the site identity are omitted if malformed, contain control characters or exceed 256 UTF-8 bytes. Call tokens, routing senders, SDP and media credentials are not retained after notification processing or exposed in callback data. Offers must come from the current authenticated transport for an activated installation; malformed offers are ignored without interrupting relay updates.
 
 Callbacks may arrive before `async_connect` completes, including during reconnect. Callers should briefly buffer sanitized notifications if their own interface is not ready. Receipt does not acknowledge an offer, answer, pick up, hang up or negotiate media. It does not use Firebase. Live server delivery with an empty mobile push token remains a field check.
 
 Deduplication stores at most 256 token digests. Repeated offers refresh a 15-minute idle expiry; the cache survives reconnects for the same installation and clears on explicit close or an installation change. No disconnected call history is fetched or replayed. Incoming payloads require bounded routing identities, an opaque token of at most 1,024 UTF-8 bytes and valid Base64 SDP of at most 256 KiB beginning with `v=0`.
 
-## Opt-in media signalling
-
-The SDK handles signalling only; a separate receiver owns WebRTC transport and video. Call `client.set_media_enabled(True)` before connecting to retain future offers privately. Enabling it does not restore an offer previously discarded while disabled and does not send anything to the provider.
-
-`client.media_snapshot` reports cached state. `subscribe_media(callback)` reports transitions, while the existing `subscribe_calls` callback remains the safe ring notification. One parser and lifecycle supply both: the private offer is committed before ring callbacks run. Inspect the current snapshot after subscribing; state subscriptions do not replay an old ring.
-
-On deliberate media demand, obtain the current local `call_id` and call `await client.async_claim_media(call_id)`. The returned `MediaOffer` contains a local `claim_id` and SDP for the receiver. It is private in-memory data, never suitable for entity attributes, forms, diagnostics or logs. Its `expires_at` is a local monotonic deadline, not a timestamp to compare on another machine.
-
-After the receiver applies the offer and gathers a complete answer, call `await client.async_submit_media_answer(call_id, claim_id, answer_sdp)`. The SDK preserves the original provider token and routing identity internally. The result is `sent` for a completed local write or `uncertain` after a possibly delivered write failed. Neither proves provider acceptance. Duplicate submissions return the recorded outcome without another transmission; do not automatically replay an uncertain result.
-
-Call `mark_media_streaming(call_id, claim_id)` only after observing local receiver readiness. Call `end_media(call_id, claim_id)` when the receiver closes or fails. Cleanup sends no provider hangup command. `MediaUnavailableError` means a call is absent, expired, already claimed or no longer current.
-
-Incoming cancellation, a superseding call, transport replacement, disconnect, revocation and close invalidate the private session. Notification deduplication may survive a reconnect, but media eligibility does not. Reopening a terminated receiving peer cannot re-answer its saved offer. The SDK does not send ring acknowledgements, pickup, refusal or hangup commands, and does not implement an invented trickle-ICE protocol.
-
-Keep receiver work out of the synchronous callbacks and ZeroMQ packet reader. Use managed asynchronous tasks, handle cancellation, and do not serialize raw media records in ordinary state storage. Disable retention with `set_media_enabled(False)` when media support is removed.
+Video calling and camera streaming are not supported. The SDK has no offer-retention, answer or media-session API. It does not send ring acknowledgements, pickup, refusal or hangup commands.
 
 ## Release one relay
 

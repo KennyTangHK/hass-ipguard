@@ -3,7 +3,6 @@
   "name": "IPGUARD",
   "codeowners": ["@KennyTangHK"],
   "config_flow": true,
-  "dependencies": ["http"],
   "integration_type": "hub",
   "documentation": "https://github.com/KennyTangHK/hass-ipguard/blob/master/docs/USAGE.md",
   "issue_tracker": "https://github.com/KennyTangHK/hass-ipguard/issues",

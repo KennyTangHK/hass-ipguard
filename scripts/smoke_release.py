@@ -75,7 +75,6 @@ class CloudFixture:
         self.acknowledge = True
         self.permission = True
         self.existing = existing
-        self.media_answer_received = asyncio.Event()
 
     def settings(self) -> dict[str, str]:
         return {
@@ -178,18 +177,6 @@ class CloudFixture:
                         token,
                         BOARD,
                     )
-                continue
-            if event == "sp_ps_sdp_answer":
-                assert secure and len(frames) == 3
-                assert frames[1] == b"fixture-call-service"
-                assert set(body) == {"token", "remoteIdentity", "sdp"}
-                assert body["token"] == "fixture-private-preview-token"
-                assert body["remoteIdentity"] == BOARD
-                assert (
-                    base64.b64decode(body["sdp"]).decode()
-                    == "v=0\r\na=ice-pwd:fixture-private-answer-secret\r\n"
-                )
-                self.media_answer_received.set()
                 continue
             assert len(frames) == 2
             if event == "hello":
@@ -378,129 +365,69 @@ async def check_incoming_calls(
         unsubscribe()
 
 
-async def check_media_preview(
+async def check_retired_video(
     hass: HomeAssistant, fixture: CloudFixture, entry: Any, http_port: int
 ) -> None:
-    """Exercise real HTTP/WS bridge routing with the SDK from the release ZIP."""
-    media = importlib.import_module("custom_components.ipguard.media")
-    const = importlib.import_module("custom_components.ipguard.const")
-    camera_module = importlib.import_module("homeassistant.components.camera")
+    """Migrate old video settings without changing the saved account or entities."""
+    component = importlib.import_module("custom_components.ipguard")
+    registry = entity_registry.async_get(hass)
     session_before = dict(entry.data["session"])
-    button_before = hass.states.async_all("button")[0].entity_id
-    event_before = hass.states.async_all("event")[0].entity_id
-    credential = "fixture-private-companion-credential"
-    source = "rtsp://127.0.0.1:8554/fixture-private-source"
+    entities_before = {
+        record.entity_id: record.unique_id
+        for record in registry.entities.values()
+        if record.config_entry_id == entry.entry_id
+    }
     assert await hass.config_entries.async_unload(entry.entry_id)
+    credential = "fixture-retired-companion-credential"
     hass.config_entries.async_update_entry(
         entry,
+        minor_version=1,
         options={
-            **entry.options,
-            const.CONF_VIDEO_ENABLED: True,
-            const.CONF_COMPANION_CREDENTIAL: credential,
-            const.CONF_RTSP_URL: source,
+            "video_enabled": True,
+            "scrypted_url": "https://obsolete.example.invalid",
+            "ha_url": "http://obsolete.example.invalid",
+            "companion_credential": credential,
+            "rtsp_url": "rtsp://obsolete.example.invalid/private-source",
+            "verify_ssl": True,
+            "fixture_option": "preserved",
         },
+    )
+    camera = registry.async_get_or_create(
+        "camera",
+        "ipguard",
+        f"{entry.entry_id}_incoming_video",
+        config_entry=entry,
+        suggested_object_id="retired_incoming_video",
     )
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
+    assert entry.minor_version == 2
+    assert dict(entry.options) == {"fixture_option": "preserved"}
     assert entry.data["session"] == session_before
-    assert hass.states.async_all("button")[0].entity_id == button_before
-    assert hass.states.async_all("event")[0].entity_id == event_before
-    states = hass.states.async_all("camera")
-    assert len(states) == 1 and states[0].state == "unavailable"
-    camera_id = states[0].entity_id
-    record = entity_registry.async_get(hass).async_get(camera_id)
-    assert record is not None and record.unique_id == f"{entry.entry_id}_incoming_video"
-    camera = hass.data[camera_module.DATA_COMPONENT].get_entity(camera_id)
-    assert camera is not None
-    assert (await camera.async_camera_image()).startswith(b"\x89PNG")
-    assert fixture.count("sp_ps_sdp_answer") == 0
-    url = f"http://127.0.0.1:{http_port}/api/ipguard/media/{entry.entry_id}"
+    assert registry.async_get(camera.entity_id) is None
+    assert {
+        record.entity_id: record.unique_id
+        for record in registry.entities.values()
+        if record.config_entry_id == entry.entry_id
+    } == entities_before
+    assert not hass.states.async_all("camera")
+    assert component.__file__ is not None
+    assert not {"camera.py", "media.py", "video_setup.py"} & {
+        path.name for path in Path(component.__file__).parent.iterdir()
+    }
+    assert not any(
+        "/api/ipguard/media/" in str(route.resource)
+        for route in hass.http.app.router.routes()
+    )
     async with ClientSession() as session:
-
-        async def operation(
-            name: str,
-            fields: dict[str, object] | None = None,
-            *,
-            authorized: bool = True,
-            status: int = 200,
-        ) -> dict[str, Any]:
-            headers = {"Authorization": f"Bearer {credential}"} if authorized else {}
-            async with session.post(
-                f"{url}/{name}",
-                headers=headers,
-                json={"version": media.BRIDGE_VERSION, **(fields or {})},
-            ) as response:
-                assert response.status == status
-                result: dict[str, Any] = await response.json()
-                return result
-
-        await operation("state", authorized=False, status=401)
-        state = await operation("state")
-        assert state["state"] == "idle" and state["call_id"] is None
-        async with session.ws_connect(
-            f"{url}/events", headers={"Authorization": f"Bearer {credential}"}
-        ) as stream:
-            initial = await stream.receive_json(timeout=5)
-            assert initial["state"] == "idle"
-            await fixture.incoming_call("fixture-private-preview-token")
-            notice = await stream.receive_json(timeout=5)
-            assert notice["state"] == "pending"
-            await hass.async_block_till_done()
-            assert camera.available
-            assert await camera.stream_source() == source
-            assert (await camera.async_camera_image()).startswith(b"\x89PNG")
-            state = await operation("state")
-            assert state["call_id"] == notice["call_id"]
-            assert fixture.count("sp_ps_sdp_answer") == 0
-            claim = await operation("claim", {"call_id": state["call_id"]})
-            assert "fixture-private-media-secret" in claim["sdp"]
-            assert fixture.count("sp_ps_sdp_answer") == 0
-            fields = {"call_id": claim["call_id"], "claim_id": claim["claim_id"]}
-            answer = {
-                **fields,
-                "sdp": "v=0\r\na=ice-pwd:fixture-private-answer-secret\r\n",
-            }
-            assert (await operation("answer", answer))["outcome"] == "sent"
-            assert (await operation("answer", answer))["outcome"] == "sent"
-            await asyncio.wait_for(fixture.media_answer_received.wait(), 5)
-            assert fixture.count("sp_ps_sdp_answer") == 1
-            await operation("streaming", fields)
-            assert (await operation("state"))["state"] == "streaming"
-            assert fixture.routing_id is not None
-            await fixture.send(
-                fixture.secure,
-                fixture.routing_id,
-                "ps_sp_hangup_call",
-                {},
-                "fixture-private-preview-token",
-                "fixture-call-service",
-            )
-            async with asyncio.timeout(5):
-                while (await stream.receive_json(timeout=5))["state"] != "ended":
-                    pass
-            await wait_for_state(hass, camera_id, "unavailable")
-            await operation("streaming", fields, status=409)
-            await operation("end", fields)
-            await fixture.incoming_call("fixture-private-preview-token")
-            await asyncio.sleep(0.05)
-            assert (await operation("state"))["state"] == "ended"
-            assert fixture.count("sp_ps_sdp_answer") == 1
-            public = repr([state.as_dict() for state in hass.states.async_all()])
-            for secret in (
-                credential,
-                source,
-                claim["call_id"],
-                claim["claim_id"],
-                claim["sdp"],
-                "fixture-private-preview-token",
-                "fixture-private-answer-secret",
-            ):
-                assert secret not in public
-        assert await hass.config_entries.async_reload(entry.entry_id)
-        await hass.async_block_till_done()
-        assert hass.states.async_all("camera")[0].entity_id == camera_id
-        assert entry.data["session"] == session_before
-        assert fixture.count("sp_ps_sdp_answer") == 1
+        async with session.post(
+            f"http://127.0.0.1:{http_port}/api/ipguard/media/{entry.entry_id}/state",
+            headers={"Authorization": f"Bearer {credential}"},
+            json={"version": 1},
+        ) as response:
+            assert response.status in {401, 404}
+    assert fixture.count("sp_ps_sdp_answer") == 0
+    assert fixture.count("sp_brd_open_door") == 0
 
 
 async def check(
@@ -599,7 +526,7 @@ async def check(
             events = entry_event_states(hass, entry.entry_id)
             assert len(events) == 1 and events[0].state == "unknown"
             await check_incoming_calls(hass, fixture, entry.entry_id)
-            await check_media_preview(hass, fixture, entry, http_port)
+            await check_retired_video(hass, fixture, entry, http_port)
             assert fixture.count("sp_srv_check_auth") == 0
             assert fixture.count("sp_srv_check_username") == 0
             assert fixture.count("sp_srv_override_username") == 0
@@ -614,7 +541,7 @@ async def check(
                         "no_sms_or_actuation": True,
                         "new_doorbell_event": True,
                         "passive_incoming_call": True,
-                        "private_preview_bridge": True,
+                        "retired_video_removed": True,
                     }
                 )
             )
@@ -716,7 +643,7 @@ async def check(
             print(json.dumps({"baseline_state_saved": True, "no_actuation": True}))
             return
         await check_incoming_calls(hass, fixture, entry.entry_id)
-        await check_media_preview(hass, fixture, entry, http_port)
+        await check_retired_video(hass, fixture, entry, http_port)
         await hass.services.async_call(
             "button", "press", {"entity_id": entity_id}, blocking=True
         )
@@ -755,7 +682,7 @@ async def check(
                     "eligible_buttons": len(buttons),
                     "passive_incoming_call": True,
                     "duplicate_call_suppression": True,
-                    "private_preview_bridge": True,
+                    "retired_video_removed": True,
                     "release_acknowledged": True,
                     "no_release_replay": True,
                     "permission_push": True,

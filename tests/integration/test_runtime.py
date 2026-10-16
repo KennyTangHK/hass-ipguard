@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
+from homeassistant.config_entries import ConfigEntryDisabler
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import (
@@ -13,6 +14,7 @@ from homeassistant.exceptions import (
     ConfigEntryError,
     ConfigEntryNotReady,
 )
+from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
 from ipguard_api import (
     AuthRevokedError,
@@ -25,7 +27,12 @@ from ipguard_api import (
 )
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.ipguard import async_setup_entry, async_unload_entry
+from custom_components.ipguard import (
+    async_migrate_entry,
+    async_setup_entry,
+    async_unload_entry,
+)
+from custom_components.ipguard.config_flow import IpguardConfigFlow
 from custom_components.ipguard.const import CONF_SESSION, DOMAIN
 
 
@@ -268,13 +275,121 @@ async def test_new_session_credentials_are_saved_from_push(
         assert await hass.config_entries.async_unload(entry.entry_id)
 
 
+@pytest.mark.parametrize("video_enabled", [True, False])
+async def test_upgrade_removes_video_without_changing_account_or_supported_entities(
+    hass: HomeAssistant,
+    client: Mock,
+    session: Session,
+    relay: Relay,
+    video_enabled: bool,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    credential = "obsolete-private-companion-credential"
+    source = "rtsp://obsolete.example.invalid/private-path"
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Kenny",
+        unique_id="email:person@example.invalid",
+        data={CONF_SESSION: session.to_dict()},
+        options={
+            "video_enabled": video_enabled,
+            "scrypted_url": "https://obsolete.example.invalid",
+            "ha_url": "http://ha.example.invalid",
+            "companion_credential": credential,
+            "rtsp_url": source,
+            "verify_ssl": False,
+            "unrelated_setting": "preserved",
+        },
+        version=1,
+        minor_version=1,
+    )
+    entry.add_to_hass(hass)
+    registry = er.async_get(hass)
+    button = registry.async_get_or_create(
+        "button",
+        DOMAIN,
+        f"{entry.entry_id}_{relay.board.identity}_{relay.number}_release",
+        config_entry=entry,
+        suggested_object_id="my_front_door",
+    )
+    event = registry.async_get_or_create(
+        "event",
+        DOMAIN,
+        f"{entry.entry_id}_incoming_call",
+        config_entry=entry,
+        suggested_object_id="my_doorbell",
+    )
+    camera = registry.async_get_or_create(
+        "camera",
+        DOMAIN,
+        f"{entry.entry_id}_incoming_video",
+        config_entry=entry,
+    )
+    other_entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_SESSION: session.to_dict()},
+        disabled_by=ConfigEntryDisabler.USER,
+    )
+    other_entry.add_to_hass(hass)
+    other_camera = registry.async_get_or_create(
+        "camera",
+        DOMAIN,
+        f"{other_entry.entry_id}_incoming_video",
+        config_entry=other_entry,
+    )
+    original_data = dict(entry.data)
+    with patch("custom_components.ipguard.IpguardClient", return_value=client):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert entry.minor_version == 2
+        assert dict(entry.data) == original_data
+        assert dict(entry.options) == {"unrelated_setting": "preserved"}
+        assert registry.async_get(camera.entity_id) is None
+        assert registry.async_get(other_camera.entity_id) is not None
+        assert registry.async_get(button.entity_id).unique_id == button.unique_id
+        assert registry.async_get(event.entity_id).unique_id == event.unique_id
+        assert hass.states.get(button.entity_id) is not None
+        assert hass.states.get(event.entity_id) is not None
+        assert hass.states.async_all("camera") == []
+        assert not IpguardConfigFlow.async_supports_options_flow(entry)
+        assert DOMAIN not in hass.data
+        client.async_request_verification.assert_not_awaited()
+        client.async_complete_registration.assert_not_awaited()
+        client.async_release.assert_not_awaited()
+        client.subscribe_calls.call_args.args[0](IncomingCall(relay.board))
+        await hass.async_block_till_done()
+        assert hass.states.get(event.entity_id).attributes["event_type"] == "ring"
+        assert await hass.config_entries.async_unload(entry.entry_id)
+    assert credential not in caplog.text and source not in caplog.text
+
+
+async def test_migration_rejects_unknown_account_schema(
+    hass: HomeAssistant, session: Session
+) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_SESSION: session.to_dict()},
+        options={"video_enabled": True},
+        version=2,
+    )
+    entry.add_to_hass(hass)
+    assert not await async_migrate_entry(hass, entry)
+    assert entry.version == 2
+    assert dict(entry.options) == {"video_enabled": True}
+    assert entry.data[CONF_SESSION] == session.to_dict()
+
+
 def test_metadata_and_translations_are_consistent() -> None:
     folder = Path(__file__).parents[2] / "custom_components" / DOMAIN
     manifest = json.loads((folder / "manifest.json").read_text())
     assert manifest["config_flow"] is True
     assert manifest["iot_class"] == "cloud_push"
     assert manifest["integration_type"] == "hub"
+    assert not manifest.get("dependencies")
     assert "quality_scale" not in manifest
     assert json.loads((folder / "strings.json").read_text()) == json.loads(
         (folder / "translations" / "en.json").read_text()
     )
+    assert not {"camera.py", "media.py", "video_setup.py"} & {
+        path.name for path in folder.iterdir()
+    }

@@ -4,7 +4,7 @@ import asyncio
 import logging
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from functools import wraps
 from struct import error as StructError
 from time import monotonic
@@ -22,7 +22,6 @@ from .errors import (
     InvalidCodeError,
     InvalidInputError,
     IpguardError,
-    MediaUnavailableError,
     OutcomeUnknownError,
     RelayUnavailableError,
     ReleaseRejectedError,
@@ -35,25 +34,21 @@ from .models import (
     Board,
     ClientSnapshot,
     IncomingCall,
-    MediaOffer,
-    MediaSnapshot,
     Relay,
     Session,
     SessionStatus,
 )
 from .protocol import (
     Packet,
-    _CallOffer,
     configuration_password,
     door_inventory,
     envelope,
     hello,
     identifier_fields,
-    media_answer,
+    incoming_call,
     packet_body,
     packet_event,
     packet_sender,
-    parse_call_offer,
 )
 from .transport import ZmqTransport
 from .validation import (
@@ -66,15 +61,8 @@ from .validation import (
 
 type Listener = Callable[[ClientSnapshot], None]
 type CallListener = Callable[[IncomingCall], None]
-type MediaListener = Callable[[MediaSnapshot], None]
 MAX_RECENT_CALLS = 256
 RECENT_CALL_TTL = 15 * 60
-MEDIA_OFFER_TTL = 30.0
-MEDIA_SETUP_TTL = 120.0
-MEDIA_MAX_LIFETIME = 10 * 60.0
-_CALL_EVENTS = frozenset(
-    {"ps_sp_sdp_offer", "ps_sp_hangup_call", "brd_sp_hangup_call", "ps_sp_ring_ack"}
-)
 _LOGGER = logging.getLogger(__name__)
 _LOGGED_EVENTS = frozenset(
     {
@@ -89,17 +77,6 @@ _LOGGED_EVENTS = frozenset(
         "brd_sp_open_door_ack",
     }
 )
-
-
-@dataclass(slots=True, repr=False)
-class _MediaCall:
-    offer: _CallOffer
-    transport: ZmqTransport
-    call_id: str
-    expires_at: float
-    maximum_deadline: float
-    state: str = "pending"
-    claim_id: str | None = None
 
 
 def _cancel_cleanup[**P, R](
@@ -153,13 +130,6 @@ class IpguardClient:
         self._call_listeners: set[CallListener] = set()
         self._call_tokens: OrderedDict[bytes, float] = OrderedDict()
         self._call_boards: dict[str, Board] = {}
-        self._media_enabled = False
-        self._media_call: _MediaCall | None = None
-        self._media_snapshot = MediaSnapshot("disabled")
-        self._media_listeners: set[MediaListener] = set()
-        self._media_expiry: asyncio.TimerHandle | None = None
-        self._media_answer_lock = asyncio.Lock()
-        self._media_answer_outcomes: OrderedDict[tuple[str, str], str] = OrderedDict()
         self._relays: tuple[Relay, ...] = ()
         self._connected = False
         self._revoked = False
@@ -203,179 +173,6 @@ class IpguardClient:
         """
         self._call_listeners.add(callback)
         return lambda: self._call_listeners.discard(callback)
-
-    @property
-    def media_snapshot(self) -> MediaSnapshot:
-        """Read cached preview state without starting or answering a call."""
-        self._expire_media()
-        return self._media_snapshot
-
-    def set_media_enabled(self, enabled: bool) -> None:
-        """Opt into retaining future offers; enabling never restores old offers."""
-        if not isinstance(enabled, bool):
-            raise InvalidInputError("Media enablement must be a boolean.")
-        if enabled == self._media_enabled:
-            return
-        self._media_enabled = enabled
-        self._finish_media()
-        self._media_snapshot = MediaSnapshot("idle" if enabled else "disabled")
-        self._notify_media()
-
-    def subscribe_media(self, callback: MediaListener) -> Callable[[], None]:
-        """Subscribe to state changes; inspect the snapshot for current state."""
-        self._media_listeners.add(callback)
-        return lambda: self._media_listeners.discard(callback)
-
-    def _notify_media(self) -> None:
-        state = self._media_snapshot.state
-        if state in {
-            "disabled",
-            "idle",
-            "pending",
-            "starting",
-            "answer_sent",
-            "streaming",
-            "ended",
-        }:
-            _LOGGER.debug("IPGUARD video state=%s", state)
-        for callback in tuple(self._media_listeners):
-            try:
-                callback(self._media_snapshot)
-            except Exception:
-                continue
-
-    def _publish_media(self, call: _MediaCall) -> None:
-        self._media_snapshot = MediaSnapshot(
-            call.state, call.call_id, call.offer.notification.board
-        )
-        self._notify_media()
-
-    def _finish_media(self) -> None:
-        if self._media_expiry is not None:
-            self._media_expiry.cancel()
-            self._media_expiry = None
-        call, self._media_call = self._media_call, None
-        if call is not None:
-            self._media_snapshot = MediaSnapshot(
-                "ended" if self._media_enabled else "disabled",
-                call.call_id if self._media_enabled else None,
-                call.offer.notification.board if self._media_enabled else None,
-            )
-            self._notify_media()
-
-    def _expire_media(self) -> None:
-        if self._media_call is not None and self._media_call.expires_at <= monotonic():
-            _LOGGER.debug("IPGUARD video call expired")
-            self._finish_media()
-
-    def _schedule_media_expiry(self, call: _MediaCall) -> None:
-        if self._media_expiry is not None:
-            self._media_expiry.cancel()
-        self._media_expiry = asyncio.get_running_loop().call_later(
-            max(0, call.expires_at - monotonic()), self._expire_media
-        )
-
-    def _current_media(self, call_id: str, claim_id: str | None = None) -> _MediaCall:
-        self._expire_media()
-        call = self._media_call
-        if (
-            not self._media_enabled
-            or call is None
-            or call.call_id != call_id
-            or (claim_id is not None and call.claim_id != claim_id)
-            or not self._connected
-            or not self._call_transport_current(call.transport)
-        ):
-            raise MediaUnavailableError("The media call is no longer available.")
-        return call
-
-    async def async_claim_media(self, call_id: str) -> MediaOffer:
-        """Claim one pending call on explicit media demand, without any send."""
-        call = self._current_media(call_id)
-        if call.state != "pending":
-            raise MediaUnavailableError("The media call is already claimed.")
-        call.state, call.claim_id = "starting", str(uuid4())
-        call.expires_at = min(monotonic() + MEDIA_SETUP_TTL, call.maximum_deadline)
-        self._schedule_media_expiry(call)
-        self._publish_media(call)
-        return MediaOffer(call.call_id, call.claim_id, call.offer.sdp, call.expires_at)
-
-    def _remember_media_answer(self, call_id: str, claim_id: str, result: str) -> None:
-        self._media_answer_outcomes[(call_id, claim_id)] = result
-        if result in {"sent", "uncertain"}:
-            _LOGGER.debug("IPGUARD video answer outcome=%s", result)
-        if len(self._media_answer_outcomes) > MAX_RECENT_CALLS:
-            self._media_answer_outcomes.popitem(last=False)
-
-    async def async_submit_media_answer(
-        self, call_id: str, claim_id: str, answer_sdp: str
-    ) -> str:
-        """Attempt this claim's answer once; uncertainty is never retransmitted."""
-        async with self._media_answer_lock:
-            previous = self._media_answer_outcomes.get((call_id, claim_id))
-            if previous is not None:
-                return previous
-            call = self._current_media(call_id, claim_id)
-            if call.state != "starting":
-                raise MediaUnavailableError("The media call cannot accept an answer.")
-            packet = media_answer(
-                self._identity, call.offer.remote, call.offer.token, answer_sdp
-            )
-            attempted = False
-
-            def guard() -> None:
-                nonlocal attempted
-                if (
-                    self._current_media(call_id, claim_id) is not call
-                    or call.state != "starting"
-                ):
-                    raise MediaUnavailableError(
-                        "The media call is no longer available."
-                    )
-                attempted = True
-                _LOGGER.debug("IPGUARD video answer transmission started")
-
-            try:
-                await call.transport.async_send(
-                    packet, call.offer.sender, before_send=guard
-                )
-            except asyncio.CancelledError:
-                if attempted:
-                    self._remember_media_answer(call_id, claim_id, "uncertain")
-                if self._media_call is call:
-                    self._finish_media()
-                raise
-            except Exception:
-                if attempted:
-                    self._remember_media_answer(call_id, claim_id, "uncertain")
-                    if self._media_call is call:
-                        self._finish_media()
-                    return "uncertain"
-                _LOGGER.debug("IPGUARD video answer rejected before transmission")
-                raise MediaUnavailableError("The media answer was not sent.") from None
-            self._remember_media_answer(call_id, claim_id, "sent")
-            if self._media_call is call:
-                call.state = "answer_sent"
-                call.expires_at = call.maximum_deadline
-                self._schedule_media_expiry(call)
-                self._publish_media(call)
-            return "sent"
-
-    def mark_media_streaming(self, call_id: str, claim_id: str) -> None:
-        """Record verified local receiver readiness, without provider commands."""
-        call = self._current_media(call_id, claim_id)
-        if call.state not in {"answer_sent", "streaming"}:
-            raise MediaUnavailableError("The media answer has not been sent.")
-        if call.state != "streaming":
-            call.state = "streaming"
-            self._publish_media(call)
-
-    def end_media(self, call_id: str, claim_id: str) -> None:
-        """End a receiver claim locally; never send a provider hangup."""
-        call = self._media_call
-        if call is not None and call.call_id == call_id and call.claim_id == claim_id:
-            _LOGGER.debug("IPGUARD video receiver closed locally")
-            self._finish_media()
 
     def _notify(self) -> None:
         snapshot = self.snapshot
@@ -553,11 +350,7 @@ class IpguardClient:
         await transport.async_send(
             hello(self._session.identity, self._session.identifier, self._session)
         )
-        try:
-            await self._wait_ready(self._inventory_ready, "relay inventory")
-        except IpguardError:
-            self._finish_media()
-            raise
+        await self._wait_ready(self._inventory_ready, "relay inventory")
         if self._revoked:
             raise AuthRevokedError("IPGUARD revoked this installation.")
         self._connected, self._error = True, None
@@ -718,7 +511,6 @@ class IpguardClient:
         )
 
     async def _new_transport(self, *, secure: bool) -> ZmqTransport:
-        self._finish_media()
         if self._transport is not None:
             await self._transport.async_close()
         self._connected = False
@@ -729,7 +521,7 @@ class IpguardClient:
         key = self._session.server_public_key if secure and self._session else None
 
         async def receive(packet: Packet) -> None:
-            if packet_event(packet) in _CALL_EVENTS:
+            if packet_event(packet) == "ps_sp_sdp_offer":
                 self._receive_call(packet, transport)
             else:
                 await self._on_packet(packet)
@@ -766,35 +558,10 @@ class IpguardClient:
     def _receive_call(self, packet: Packet, transport: ZmqTransport) -> None:
         if not self._call_transport_current(transport):
             return
-        event = packet_event(packet)
-        if event != "ps_sp_sdp_offer":
-            call = self._media_call
-            if call is None:
-                return
-            body = packet_body(packet)
-            expected_sender = (
-                call.offer.remote
-                if event == "brd_sp_hangup_call"
-                else call.offer.sender
-            )
-            if (
-                body.get("token") != call.offer.token
-                or packet_sender(packet) != expected_sender
-                or (
-                    "remoteIdentity" in body
-                    and body["remoteIdentity"] != call.offer.remote
-                )
-            ):
-                return
-            if event in {"ps_sp_hangup_call", "brd_sp_hangup_call"}:
-                _LOGGER.debug("IPGUARD video provider termination received")
-                self._finish_media()
-            # A ring acknowledgement does not prove local media readiness.
-            return
-        parsed = parse_call_offer(packet, self._call_boards)
+        parsed = incoming_call(packet, self._call_boards)
         if parsed is None:
             return
-        notification, token_hash = parsed.notification, parsed.token_hash
+        notification, token_hash = parsed
         now = monotonic()
         while (
             self._call_tokens
@@ -804,34 +571,10 @@ class IpguardClient:
         if token_hash in self._call_tokens:
             self._call_tokens[token_hash] = now
             self._call_tokens.move_to_end(token_hash)
-            current = self._media_call
-            if (
-                current is not None
-                and current.offer.token_hash == token_hash
-                and (
-                    current.offer.sender != parsed.sender
-                    or current.offer.remote != parsed.remote
-                    or current.offer.sdp != parsed.sdp
-                )
-            ):
-                _LOGGER.debug("IPGUARD ignored conflicting call update")
             return
         self._call_tokens[token_hash] = now
         if len(self._call_tokens) > MAX_RECENT_CALLS:
             self._call_tokens.popitem(last=False)
-        if self._media_enabled:
-            if self._media_call is not None:
-                _LOGGER.debug("IPGUARD video call superseded")
-            self._finish_media()
-            self._media_call = media = _MediaCall(
-                parsed,
-                transport,
-                str(uuid4()),
-                now + MEDIA_OFFER_TTL,
-                now + MEDIA_MAX_LIFETIME,
-            )
-            self._schedule_media_expiry(media)
-            self._publish_media(media)
         for callback in tuple(self._call_listeners):
             try:
                 callback(notification)
@@ -894,7 +637,6 @@ class IpguardClient:
 
     def _on_failure(self, error: IpguardError) -> None:
         self._connected, self._error = False, error
-        self._finish_media()
         self._failure_ready.set()
         self._revoked = isinstance(error, AuthRevokedError)
         _LOGGER.debug("IPGUARD connection stopped: %s", type(error).__name__)
@@ -930,7 +672,6 @@ class IpguardClient:
 
     async def _stop_connection(self) -> None:
         self._closed = True
-        self._finish_media()
         task, self._reconnect_task = self._reconnect_task, None
         if task and task is not asyncio.current_task():
             task.cancel()
@@ -945,11 +686,6 @@ class IpguardClient:
         self._notify()
         self._listeners.clear()
         self._call_listeners.clear()
-        self._media_listeners.clear()
-        self._media_answer_outcomes.clear()
-        self._media_snapshot = MediaSnapshot(
-            "idle" if self._media_enabled else "disabled"
-        )
         self._call_tokens.clear()
         self._call_boards.clear()
         self._verification_requested = False

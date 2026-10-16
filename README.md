@@ -20,13 +20,12 @@ Use it lawfully, only with your own authorized account and buildings or doors yo
 ## Features
 
 - Incoming call doorbell events over the existing cloud connection.
-- Optional incoming-call video through the separately installed Scrypted companion.
 - Cloud release buttons for permitted relays, grouped by intercom board.
 - Guided setup with phone or email verification and explicit consent before replacing a mobile installation.
 - Saved authorization across restarts, automatic reconnection, and availability updates when access changes.
 - One transmission per press; uncertain results are never automatically retried.
 
-Incoming calls emit a `ring` event without answering, acknowledging the call or opening a door. When video is enabled and the Scrypted companion receives a request for its live RTSP stream, it starts a receive-only preview of the current call. Video requires Scrypted and the companion plugin; buttons and notifications work without them. Firebase, microphone transmission, audio pickup, call refusal/hangup controls, Bluetooth and SIP are outside this integration's scope. Buttons report command acknowledgement; they do not measure whether a door is open or locked.
+Incoming calls emit a `ring` event without answering, acknowledging the call or opening a door. **Video calling and camera streaming are not supported.** Audio conversation, call answering/refusal/hangup, accelerated carrier-call fallback, Firebase, Bluetooth and SIP are also unsupported. Buttons report command acknowledgement; they do not measure whether a door is open or locked.
 
 ## Requirements
 
@@ -74,7 +73,7 @@ Add a release button to a dashboard or call `button.press` in an automation. But
 
 Each account also has an **incoming call** doorbell event entity. Use its **Ring** trigger to create notifications or other automations; see the [doorbell automation example](docs/USAGE.md#incoming-call-notifications). Known callers include board and site details. Call delivery with an empty mobile push token still needs confirmation on your account.
 
-To add the optional incoming-call camera, install the Scrypted companion and configure **Video** in the integration's options. The [video setup guide](docs/USAGE.md#incoming-call-video) describes pairing and on-demand playback. Provider media compatibility and delayed answer acceptance require an account-specific check; synthetic tests do not establish either.
+Use the official app or your provider's normal phone-call service to answer calls. This integration provides notifications and release buttons only; see [unsupported call features](docs/USAGE.md#unsupported-call-features).
 
 If a press reports an unknown outcome, the command may have reached the board without a matching acknowledgement. Check the entrance before choosing to press again.
 

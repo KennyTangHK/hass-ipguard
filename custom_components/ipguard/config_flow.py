@@ -9,18 +9,14 @@ from homeassistant.config_entries import (
     ConfigEntry,
     ConfigFlow,
     ConfigFlowResult,
-    OptionsFlow,
-    OptionsFlowWithReload,
 )
 from homeassistant.core import callback
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
     BooleanSelector,
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
 )
-from yarl import URL
 
 from .api import (
     AuthenticationError,
@@ -39,25 +35,13 @@ from .api import (
     validate_verification_code,
 )
 from .const import (
-    CONF_COMPANION_CREDENTIAL,
-    CONF_HA_URL,
     CONF_IDENTIFIER,
     CONF_INSTALLATION_NAME,
     CONF_REPLACE_EXISTING,
     CONF_REQUEST_NEW_CODE,
-    CONF_RTSP_URL,
-    CONF_SCRYPTED_URL,
     CONF_SESSION,
     CONF_VERIFICATION_CODE,
-    CONF_VERIFY_SSL,
-    CONF_VIDEO_ENABLED,
     DOMAIN,
-)
-from .media import CompanionError, manager, pair_companion, server_url
-from .video_setup import (
-    async_find_scrypted_app,
-    async_ingress_pairing,
-    default_ha_url,
 )
 
 USER_SCHEMA = probatio.Schema(
@@ -110,11 +94,7 @@ class IpguardConfigFlow(ConfigFlow, domain=DOMAIN):
     """Maintain one explicit enrollment challenge until completion or cancellation."""
 
     VERSION = 1
-
-    @staticmethod
-    @callback
-    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
-        return IpguardOptionsFlow()
+    MINOR_VERSION = 2
 
     def __init__(self) -> None:
         self._client: IpguardClient | None = None
@@ -309,168 +289,3 @@ class IpguardConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="reauth_confirm", data_schema=probatio.Schema({})
         )
-
-
-class IpguardOptionsFlow(OptionsFlowWithReload):
-    """Explicit video opt-in and programmatic companion pairing."""
-
-    @callback
-    def async_remove(self) -> None:
-        manager(self.hass).pairing.pop(self.config_entry.entry_id, None)
-
-    async def async_step_init(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        if user_input is not None:
-            if user_input.get(CONF_VIDEO_ENABLED) is True:
-                return await self.async_step_video()
-            manager(self.hass).revoke(self.config_entry.entry_id)
-            options = dict(self.config_entry.options)
-            options[CONF_VIDEO_ENABLED] = False
-            options.pop(CONF_COMPANION_CREDENTIAL, None)
-            options.pop(CONF_RTSP_URL, None)
-            return self.async_create_entry(data=options)
-        return self.async_show_form(
-            step_id="init",
-            data_schema=probatio.Schema(
-                {
-                    probatio.Required(
-                        CONF_VIDEO_ENABLED,
-                        default=self.config_entry.options.get(
-                            CONF_VIDEO_ENABLED, False
-                        ),
-                    ): BooleanSelector()
-                }
-            ),
-        )
-
-    async def async_step_video(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        errors: dict[str, str] = {}
-        suggestions = {
-            CONF_SCRYPTED_URL: self.config_entry.options.get(CONF_SCRYPTED_URL, ""),
-            CONF_HA_URL: self.config_entry.options.get(CONF_HA_URL, ""),
-        }
-        if not suggestions[CONF_HA_URL]:
-            try:
-                suggestions[CONF_HA_URL] = str(default_ha_url(self.hass, app=False))
-            except CompanionError:
-                pass
-        if user_input is not None:
-            try:
-                supplied_url = user_input.get(CONF_SCRYPTED_URL, "")
-                supplied_ha = user_input.get(CONF_HA_URL, "")
-                if not isinstance(supplied_url, str) or not isinstance(
-                    supplied_ha, str
-                ):
-                    raise CompanionError("invalid_input")
-                selected_url = (
-                    server_url(supplied_url, https=True)
-                    if supplied_url.strip()
-                    else None
-                )
-                username = user_input.get("username", "")
-                password = user_input.get("password", "")
-                if (
-                    not isinstance(username, str)
-                    or not isinstance(password, str)
-                    or len(username) > 256
-                    or len(password) > 1024
-                ):
-                    raise CompanionError("invalid_input")
-                app = (
-                    await async_find_scrypted_app(self.hass, selected_url)
-                    if selected_url is None or not (username and password)
-                    else None
-                )
-                if selected_url is None:
-                    selected_url = (
-                        app.url if app is not None else self._configured_scrypted_url()
-                    )
-                ha_url = (
-                    server_url(supplied_ha, https=False)
-                    if supplied_ha.strip()
-                    else default_ha_url(self.hass, app=app is not None)
-                )
-                ingress = None
-                if not username and not password and app is not None:
-                    ingress = await async_ingress_pairing(self.hass, app)
-                elif not username or not password:
-                    raise CompanionError("scrypted_credentials_required")
-                credential, source = await pair_companion(
-                    self.hass,
-                    async_get_clientsession(self.hass),
-                    self.config_entry.entry_id,
-                    selected_url,
-                    ha_url,
-                    username,
-                    password,
-                    verify_ssl=user_input.get(CONF_VERIFY_SSL, True) is True,
-                    ingress=ingress,
-                )
-            except CompanionError as error:
-                category = str(error)
-                errors["base"] = (
-                    category
-                    if category
-                    in {
-                        "cannot_pair",
-                        "cannot_discover",
-                        "scrypted_not_found",
-                        "multiple_scrypted",
-                        "ha_url_unavailable",
-                        "scrypted_credentials_required",
-                    }
-                    else "invalid_video_input"
-                )
-            else:
-                manager(self.hass).revoke(self.config_entry.entry_id)
-                return self.async_create_entry(
-                    data={
-                        **self.config_entry.options,
-                        CONF_VIDEO_ENABLED: True,
-                        CONF_SCRYPTED_URL: str(selected_url),
-                        CONF_HA_URL: str(ha_url),
-                        CONF_COMPANION_CREDENTIAL: credential,
-                        CONF_RTSP_URL: source,
-                    }
-                )
-        schema = probatio.Schema(
-            {
-                probatio.Optional(CONF_SCRYPTED_URL): TextSelector(),
-                probatio.Optional(CONF_HA_URL): TextSelector(),
-                probatio.Optional("username"): TextSelector(),
-                probatio.Optional("password"): TextSelector(
-                    TextSelectorConfig(type=TextSelectorType.PASSWORD)
-                ),
-                probatio.Required(CONF_VERIFY_SSL, default=True): BooleanSelector(),
-            }
-        )
-        return self.async_show_form(
-            step_id="video",
-            data_schema=self.add_suggested_values_to_schema(schema, suggestions),
-            errors=errors,
-        )
-
-    def _configured_scrypted_url(self) -> URL:
-        """Use an already configured server address without copying its credentials."""
-        candidates = set()
-        for entry in self.hass.config_entries.async_entries("scrypted"):
-            host = entry.data.get("host")
-            if not isinstance(host, str) or not host:
-                continue
-            try:
-                url = server_url(
-                    host if "://" in host else f"https://{host}", https=True
-                )
-            except CompanionError:
-                continue
-            if "://" not in host and url.explicit_port is None:
-                url = url.with_port(10443)
-            candidates.add(url)
-        if len(candidates) != 1:
-            raise CompanionError(
-                "multiple_scrypted" if candidates else "scrypted_not_found"
-            )
-        return candidates.pop()

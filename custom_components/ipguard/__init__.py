@@ -2,15 +2,15 @@
 
 from collections.abc import Mapping
 
-from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import (
     ConfigEntryAuthFailed,
     ConfigEntryError,
     ConfigEntryNotReady,
 )
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.typing import ConfigType
-from homeassistant.setup import async_setup_component
 
 from .api import (
     AuthenticationError,
@@ -23,7 +23,6 @@ from .api import (
     SessionStatus,
 )
 from .const import CONF_SESSION, DOMAIN, PLATFORMS
-from .media import manager, register_views
 from .runtime import (
     IpguardConfigEntry,
     IpguardCoordinator,
@@ -33,8 +32,40 @@ from .runtime import (
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Register local bridge routes once; no provider action is performed."""
-    register_views(hass)
+    """Initialize without provider actions or local signalling endpoints."""
+    return True
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: IpguardConfigEntry) -> bool:
+    """Remove obsolete video configuration while preserving account and entities."""
+    if entry.version != 1:
+        return False
+    if entry.minor_version < 2:
+        obsolete_options = {
+            "video_enabled",
+            "scrypted_url",
+            "ha_url",
+            "companion_credential",
+            "rtsp_url",
+            "verify_ssl",
+        }
+        registry = er.async_get(hass)
+        camera_id = registry.async_get_entity_id(
+            "camera", DOMAIN, f"{entry.entry_id}_incoming_video"
+        )
+        if camera_id is not None:
+            camera = registry.async_get(camera_id)
+            if camera is not None and camera.config_entry_id == entry.entry_id:
+                registry.async_remove(camera_id)
+        hass.config_entries.async_update_entry(
+            entry,
+            options={
+                key: value
+                for key, value in entry.options.items()
+                if key not in obsolete_options
+            },
+            minor_version=2,
+        )
     return True
 
 
@@ -58,15 +89,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: IpguardConfigEntry) -> b
 
     client = IpguardClient(session=session)
     runtime = IpguardRuntimeData(client, IpguardCoordinator(hass, entry))
-    owner = manager(hass)
-    runtime.media = owner.create_bridge(entry, client)
-
-    @callback
-    def unregister_media() -> None:
-        if owner.bridges.get(entry.entry_id) is runtime.media:
-            owner.bridges.pop(entry.entry_id, None)
-
-    runtime.unregister_media = unregister_media
 
     async def reauthenticate() -> None:
         await runtime.async_close()
@@ -121,20 +143,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: IpguardConfigEntry) -> b
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, shutdown)
     )
     try:
-        if runtime.media is not None and not await async_setup_component(
-            hass, "stream", {}
-        ):
-            raise ConfigEntryNotReady(
-                translation_domain=DOMAIN, translation_key="media_unavailable"
-            )
-        await hass.config_entries.async_forward_entry_setups(
-            entry,
-            [
-                platform
-                for platform in PLATFORMS
-                if platform != Platform.CAMERA or runtime.media is not None
-            ],
-        )
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     except BaseException:
         await runtime.async_close()
         raise
@@ -143,14 +152,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: IpguardConfigEntry) -> b
 
 async def async_unload_entry(hass: HomeAssistant, entry: IpguardConfigEntry) -> bool:
     """Unload entities and stop every cloud resource owned by this entry."""
-    if not await hass.config_entries.async_unload_platforms(
-        entry,
-        [
-            platform
-            for platform in PLATFORMS
-            if platform != Platform.CAMERA or entry.runtime_data.media is not None
-        ],
-    ):
+    if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
     await entry.runtime_data.async_close()
     return True

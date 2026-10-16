@@ -45,10 +45,6 @@ class RelayUnavailableError(IpguardError):
     """A relay is absent, unpermitted, pending confirmation, or already busy."""
 
 
-class MediaUnavailableError(IpguardError):
-    """A preview offer or receiver claim is unavailable or no longer current."""
-
-
 class ReleaseRejectedError(IpguardError):
     """A correlated acknowledgement explicitly rejected the release request."""
 
