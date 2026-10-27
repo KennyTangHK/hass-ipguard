@@ -1,0 +1,174 @@
+name: Checks
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_call:
+    inputs:
+      expected-tag:
+        description: Release tag to validate before building release assets.
+        required: false
+        default: ""
+        type: string
+    outputs:
+      version:
+        description: Validated integration version.
+        value: ${{ jobs.checks.outputs.version }}
+      sdk-version:
+        description: Validated independent SDK version.
+        value: ${{ jobs.checks.outputs.sdk-version }}
+      artifact-name:
+        description: Fresh, validated release files from this workflow run.
+        value: ${{ jobs.checks.outputs.artifact-name }}
+      tested-commit:
+        description: Commit checked out, tested, and used to build these assets.
+        value: ${{ jobs.checks.outputs.tested-commit }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ inputs.expected-tag == '' }}
+
+jobs:
+  hassfest:
+    name: Home Assistant manifest validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: home-assistant/actions/hassfest@86d4564712fa02543c808e3a693dd04f9d3f8361
+
+  hacs:
+    name: HACS repository validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Validate the current repository with HACS
+        uses: docker://ghcr.io/hacs/action@sha256:dc92fdad2f6ffbe74bffb7269d781ea8e064f52d9bb486cdf3925d74e7ab6ebf
+        env:
+          INPUT_CATEGORY: integration
+          INPUT_GITHUB_TOKEN: ${{ github.token }}
+          INPUT_COMMENT: "false"
+          REPOSITORY_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+
+  checks:
+    name: Validate, test, and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: hass-ipguard
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      sdk-version: ${{ steps.metadata.outputs.sdk_version }}
+      artifact-name: ${{ steps.artifact.outputs.name }}
+      tested-commit: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          path: hass-ipguard
+      - name: Validate GitHub Actions workflows
+        run: |
+          curl --fail --location --retry 3 \
+            --output "$RUNNER_TEMP/actionlint.tar.gz" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check
+          tar --extract --gzip --file "$RUNNER_TEMP/actionlint.tar.gz" \
+            --directory "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: hass-ipguard/.python-version
+      - name: Bind the checked checkout to the triggering commit
+        id: commit
+        env:
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          checkout_sha="$(git rev-parse HEAD)"
+          if [[ "$checkout_sha" != "$EVENT_SHA" ]]; then
+            echo "::error::Checkout does not match the triggering commit."
+            exit 1
+          fi
+          echo "sha=$checkout_sha" >> "$GITHUB_OUTPUT"
+      - name: Prepare and validate project and release metadata
+        id: metadata
+        env:
+          RELEASE_TAG: ${{ inputs.expected-tag }}
+          RELEASE_REF_TYPE: ${{ github.ref_type }}
+        run: |
+          args=(--prepare --tag "$RELEASE_TAG" --github-output "$GITHUB_OUTPUT")
+          if [[ -n "$RELEASE_TAG" ]]; then
+            args+=(--ref-type "$RELEASE_REF_TYPE")
+          fi
+          python -m scripts.release_metadata "${args[@]}"
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.24"
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run --no-sync ruff check .
+      - run: uv run --no-sync ruff format --check .
+      - run: uv run --no-sync mypy
+      - run: uv run --no-sync pytest
+      - name: Download and verify the locked PyPI SDK distributions
+        run: python -m scripts.sdk_package --output dist
+      - run: uv build --build-constraints build-constraints.txt --require-hashes
+      - run: uv run --no-sync python scripts/build_release.py
+      - name: Validate all release assets and generate checksums
+        run: python -m scripts.release_metadata --dist dist --write-checksums
+      - run: docker build -f scripts/Dockerfile.smoke -t ipguard-ha-smoke:2026.10.0 scripts
+      - name: Test the portable release in Home Assistant
+        env:
+          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          for registration in normal replace decline; do
+            docker run --rm --network none \
+              -v "$GITHUB_WORKSPACE/hass-ipguard/dist:/releases:ro" \
+              -v "$GITHUB_WORKSPACE/hass-ipguard/scripts:/checks:ro" \
+              --entrypoint python ipguard-ha-smoke:2026.10.0 \
+              /checks/smoke_release.py "/releases/ipguard-$RELEASE_VERSION.zip" \
+              --registration "$registration"
+          done
+      - name: Test the HACS archive in Home Assistant
+        run: |
+          docker run --rm --network none \
+            -v "$GITHUB_WORKSPACE/hass-ipguard/dist:/releases:ro" \
+            -v "$GITHUB_WORKSPACE/hass-ipguard/scripts:/checks:ro" \
+            --entrypoint python ipguard-ha-smoke:2026.10.0 \
+            /checks/smoke_release.py /releases/ipguard.zip
+      - name: Test restart without reenrollment
+        run: |
+          docker run --rm --network none \
+            -v "$GITHUB_WORKSPACE/hass-ipguard/dist:/releases:ro" \
+            -v "$GITHUB_WORKSPACE/hass-ipguard/scripts:/checks:ro" \
+            --entrypoint python ipguard-ha-smoke:2026.10.0 \
+            /checks/smoke_release.py /releases/ipguard.zip --restart
+      - name: Set the artifact name
+        if: inputs.expected-tag != ''
+        id: artifact
+        run: echo "name=ipguard-dist-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+      - name: Upload checked release assets
+        if: inputs.expected-tag != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: |
+            hass-ipguard/dist/ipguard.zip
+            hass-ipguard/dist/ipguard.zip.sha256
+            hass-ipguard/dist/ipguard-${{ steps.metadata.outputs.version }}.zip
+            hass-ipguard/dist/ipguard-${{ steps.metadata.outputs.version }}.zip.sha256
+            hass-ipguard/dist/ha_ipguard-${{ steps.metadata.outputs.version }}-py3-none-any.whl
+            hass-ipguard/dist/ha_ipguard-${{ steps.metadata.outputs.version }}.tar.gz
+            hass-ipguard/dist/ipguard_api-${{ steps.metadata.outputs.sdk_version }}-py3-none-any.whl
+            hass-ipguard/dist/ipguard_api-${{ steps.metadata.outputs.sdk_version }}.tar.gz
+            hass-ipguard/dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14

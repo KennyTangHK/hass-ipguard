@@ -1,0 +1,61 @@
+name: Publish release
+run-name: Publish ${{ github.ref_name }}
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    name: Validate and build this tag
+    uses: ./.github/workflows/checks.yml
+    with:
+      expected-tag: ${{ github.ref_name }}
+    permissions:
+      contents: read
+
+  publish:
+    name: Publish the checked release assets
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: hass-ipguard
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          path: hass-ipguard
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: hass-ipguard/.python-version
+      - name: Download assets built and tested in this run
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.checks.outputs.artifact-name }}
+          path: hass-ipguard/dist
+          digest-mismatch: error
+      - name: Validate the pinned draft, reuse or upload assets, then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          EVENT_SHA: ${{ github.sha }}
+          TESTED_SHA: ${{ needs.checks.outputs.tested-commit }}
+        run: |
+          python3 -m scripts.release_publish \
+            --tag "$RELEASE_TAG" --repo "$GH_REPO" \
+            --event-sha "$EVENT_SHA" --tested-sha "$TESTED_SHA" \
+            --dist dist --notes-file release-notes.md

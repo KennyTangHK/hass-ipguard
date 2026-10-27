@@ -1,0 +1,95 @@
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ha-ipguard"
+# Development snapshot; release workflows generate this from the pushed tag.
+version = "0.1.1"
+description = "IPGUARD door-release buttons and incoming-call events for Home Assistant"
+readme = "README.md"
+requires-python = ">=3.14.2,<3.15"
+license = "Apache-2.0"
+# Runtime SDK release installed from PyPI.
+dependencies = ["ipguard-api==0.1.2"]
+
+[project.urls]
+Repository = "https://github.com/KennyTangHK/hass-ipguard"
+Issues = "https://github.com/KennyTangHK/hass-ipguard/issues"
+
+[tool.hatch.build.targets.wheel]
+only-include = [
+    "custom_components/__init__.py",
+    "custom_components/ipguard/__init__.py",
+    "custom_components/ipguard/api.py",
+    "custom_components/ipguard/brand/README.md",
+    "custom_components/ipguard/brand/icon.png",
+    "custom_components/ipguard/brand/icon.svg",
+    "custom_components/ipguard/brand/icon@2x.png",
+    "custom_components/ipguard/button.py",
+    "custom_components/ipguard/config_flow.py",
+    "custom_components/ipguard/const.py",
+    "custom_components/ipguard/event.py",
+    "custom_components/ipguard/manifest.json",
+    "custom_components/ipguard/runtime.py",
+    "custom_components/ipguard/strings.json",
+    "custom_components/ipguard/translations/en.json",
+]
+
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "custom_components/__init__.py",
+    "custom_components/ipguard/__init__.py",
+    "custom_components/ipguard/api.py",
+    "custom_components/ipguard/brand/README.md",
+    "custom_components/ipguard/brand/icon.png",
+    "custom_components/ipguard/brand/icon.svg",
+    "custom_components/ipguard/brand/icon@2x.png",
+    "custom_components/ipguard/button.py",
+    "custom_components/ipguard/config_flow.py",
+    "custom_components/ipguard/const.py",
+    "custom_components/ipguard/event.py",
+    "custom_components/ipguard/manifest.json",
+    "custom_components/ipguard/runtime.py",
+    "custom_components/ipguard/strings.json",
+    "custom_components/ipguard/translations/en.json",
+    "docs/USAGE.md",
+    "README.md",
+    "DEVELOPMENT.md",
+    "LICENSE",
+    "pyproject.toml",
+    ".gitignore",
+]
+
+[dependency-groups]
+dev = [
+    "hatchling==1.32.4",
+    "homeassistant==2026.10.0",
+    "mypy==2.4.0",
+    "pytest==9.0.3",
+    "pytest-asyncio==1.4.0",
+    "pytest-homeassistant-custom-component==0.13.371",
+    "ruff==0.16.10",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra --strict-config --strict-markers"
+
+[tool.ruff]
+target-version = "py314"
+line-length = 88
+extend-exclude = [".cache", ".venv", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+explicit_package_bases = true
+files = ["custom_components/ipguard", "scripts", "conftest.py"]
+exclude = ["dist", ".cache", ".venv"]

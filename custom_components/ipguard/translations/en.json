@@ -1,0 +1,109 @@
+{
+  "title": "IPGUARD",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up IPGUARD",
+        "description": "Use the phone number or email registered for your building. Submitting requests a verification code.",
+        "data": {
+          "identifier": "Phone number or email",
+          "installation_name": "Personal or Android device name"
+        },
+        "data_description": {
+          "identifier": "Use international format, for example +447700900123 (UK) or +33612345678 (France), or your registered email. For UK and French numbers, omit the domestic leading 0 after the country code. Spaces and 00 prefixes are accepted.",
+          "installation_name": "A personal name identifying this installation."
+        }
+      },
+      "verification": {
+        "title": "Verify your account",
+        "description": "Enter the six-digit code. To request a new code instead, select Request a new code and submit. Codes are never resent automatically.",
+        "data": {
+          "verification_code": "Verification code",
+          "request_new_code": "Request a new code"
+        },
+        "data_description": {
+          "verification_code": "Keep all six digits, including leading zeros.",
+          "request_new_code": "Only selecting this option and submitting sends another SMS or email."
+        }
+      },
+      "replace": {
+        "title": "Replace an existing installation?",
+        "description": "IPGUARD reports an existing mobile installation. Replacement can disable the previous mobile app. Leave the option off and submit to cancel.",
+        "data": {
+          "replace_existing": "Replace the existing installation"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Sign in again",
+        "description": "IPGUARD authorization is no longer valid. Continue to request a new verification code. Merely opening this screen sends no code."
+      }
+    },
+    "error": {
+      "invalid_identifier": "Enter your registered email or an international phone number, for example +447700900123 (UK) or +33612345678 (France).",
+      "invalid_name": "Enter a personal or Android device name.",
+      "invalid_input": "Check the account identifier and installation name.",
+      "invalid_code": "The code was rejected. Enter exactly six digits.",
+      "code_expired": "The verification code has expired. Explicitly request a new code.",
+      "rate_limited": "IPGUARD has limited verification attempts. Wait before explicitly trying again.",
+      "invalid_auth": "IPGUARD rejected account authorization. Check your account and verification code.",
+      "cannot_connect": "Unable to connect to IPGUARD. No code has been automatically resent."
+    },
+    "abort": {
+      "already_configured": "This account is already configured.",
+      "already_in_progress": "Setup for this account is already in progress.",
+      "unique_id_mismatch": "Use the same account as this integration entry. Add a different account separately.",
+      "invalid_session": "Saved account authorization is incomplete. Remove this entry and set it up again.",
+      "challenge_missing": "Request a verification code before verifying it.",
+      "replacement_declined": "Replacement was declined. No account was added.",
+      "reauth_successful": "Account authorization was updated."
+    }
+  },
+  "entity": {
+    "button": {
+      "release": {
+        "name": "Release {relay} ({board})"
+      }
+    },
+    "event": {
+      "incoming_call": {
+        "name": "Incoming call"
+      }
+    }
+  },
+  "exceptions": {
+    "invalid_session": {
+      "message": "Saved account authorization is incomplete. Set up this account again."
+    },
+    "invalid_auth": {
+      "message": "IPGUARD authorization is no longer valid. Sign in again through the integration settings."
+    },
+    "cannot_connect": {
+      "message": "Unable to connect to the IPGUARD cloud."
+    },
+    "unavailable": {
+      "message": "This relay is unavailable. No release request was sent."
+    },
+    "busy": {
+      "message": "A release request for this relay is already in progress. No additional request was queued."
+    },
+    "outcome_unknown": {
+      "message": "The release may have been sent, but no matching acknowledgement was received. It has not been retried."
+    },
+    "release_failed": {
+      "message": "IPGUARD rejected the release request or the connection failed. It has not been retried."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "IPGUARD options",
+        "data": {
+          "auto_hangup": "Auto hangup"
+        },
+        "data_description": {
+          "auto_hangup": "Hang up the internet call to trigger the carrier call sooner. Ring notifications remain enabled when this is off."
+        }
+      }
+    }
+  }
+}

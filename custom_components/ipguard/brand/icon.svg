@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <title>Community door-release integration</title>
+  <rect x="8" y="8" width="240" height="240" rx="48" fill="#214566"/>
+  <path d="M72 216V52h106v164" fill="none" stroke="#f8fafc" stroke-width="12" stroke-linejoin="round"/>
+  <path d="M78 62l64 24v132l-64-2z" fill="#5eead4"/>
+  <circle cx="124" cy="151" r="6" fill="#214566"/>
+  <path d="M54 218h141" stroke="#f8fafc" stroke-width="10"/>
+</svg>
