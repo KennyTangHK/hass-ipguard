@@ -24,7 +24,11 @@ from scripts.packaging_policy import (
     validate_wheel_payload,
     zip_contents,
 )
-from scripts.prepare_release import prepare_release, validate_sdk_source
+from scripts.prepare_release import (
+    _local_packages,
+    prepare_release,
+    validate_sdk_source,
+)
 from scripts.sdk_package import read_sdk, validate_sdk_artifacts
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -94,6 +98,9 @@ def read_metadata(root: Path, tag: str = "") -> ReleaseMetadata:
     sdk_version = sdk.version
     if manifest.get("domain") != "ipguard" or manifest.get("version") != version:
         raise ValueError("Integration manifest and package versions disagree.")
+    lock = tomllib.loads((root / "uv.lock").read_text())
+    if _local_packages(lock)["ha-ipguard"]["version"] != version:
+        raise ValueError("Integration lockfile and package versions disagree.")
     requirement = f"ipguard-api=={sdk_version}"
     if requirement not in project.get("dependencies", []):
         raise ValueError("Integration package must pin the current SDK version.")
@@ -109,7 +116,7 @@ def read_metadata(root: Path, tag: str = "") -> ReleaseMetadata:
                 f"Release tag {tag} does not match integration version {version}; "
                 f"expected v{version}. Run python -m scripts.release_metadata "
                 f"--prepare --tag {tag} "
-                "to generate metadata from this tag before validating."
+                "and commit the prepared metadata before creating the tag."
             )
     return ReleaseMetadata(version, sdk_version)
 

@@ -60,13 +60,13 @@ The SDK helper downloads the exact wheel and source archive recorded in `uv.lock
 
 The integration builder produces two archives and their checksums. `dist/ipguard.zip` contains flat integration files for HACS. `dist/ipguard-<version>.zip` contains `custom_components/ipguard` for manual installation. Both retain the normal SDK imports and the exact PyPI requirement. Home Assistant installs that requirement and its dependencies. `release.json` records the SDK version and both published archive hashes. Identical inputs produce identical ZIP contents.
 
-Release preparation derives the integration version from the tag and synchronizes the manifest's SDK pin from `pyproject.toml`. It changes only the integration version in `uv.lock`. It does not change the registry SDK version, dependencies, URLs or hashes. An SDK pin that disagrees with the lockfile stops preparation. The publisher repeats these checks from the tested integration commit before it makes GitHub requests.
+Before a release, prepare and commit the integration version in `pyproject.toml`, `manifest.json` and `uv.lock`. Preparation synchronizes the manifest's SDK pin from `pyproject.toml`. It does not change the registry SDK version, dependencies, URLs or hashes. An SDK pin that disagrees with the lockfile stops preparation. The release workflow and publisher validate the committed versions against the tag before building or publishing. They do not rewrite the tagged source.
 
-For a local tagged build, run `uv run --no-project --python "$(cat .python-version)" python scripts/prepare_release.py --tag "$release_tag"` before the build. Without a tag, preparation keeps the development version. HACS offers generated release archives. Neither ZIP includes SDK source or native binaries. Before adopting an SDK with different dependencies or archive contents, review the SDK validation and release checks.
+For a local tagged build, run `uv run --no-project --python "$(cat .python-version)" python scripts/prepare_release.py --tag "$release_tag"` and review the changes before the build. Without a tag, preparation keeps the current version. HACS offers generated release archives. Neither ZIP includes SDK source or native binaries. Before adopting an SDK with different dependencies or archive contents, review the SDK validation and release checks.
 
 The checks workflow runs on pull requests and default-branch pushes. The release workflow calls it before publication. HACS and Hassfest validation run alongside local checks. All must pass for a release. Local checks include actionlint, lint, formatting, strict typing, tests, builds and the isolated container release check. Superseded ordinary CI runs are cancelled. Tagged release runs are not cancelled. All runs build and validate release files. Only release calls upload the nine checked publication assets. These include exact copies of the SDK wheel and source distribution published on PyPI. Only the publishing job receives `contents: write`. Normal changes and pull requests receive read-only permissions. Custom packaging does not imply Home Assistant Core approval.
 
-Release helpers are in `scripts/`. Their synthetic tests are in `tests/`. The standard mypy and pytest commands include them. Invoke the metadata and publishing helpers as `python -m scripts.release_metadata` and `python -m scripts.release_publish`. The publisher verifies the SDK pin and registry hashes before preparation, then checks downloaded SDK bytes before it accesses GitHub. The reusable checks reject a release request from a branch before they prepare metadata. After the publisher downloads the checked assets, it prepares metadata and validates their bytes once before it makes GitHub requests.
+Release helpers are in `scripts/`. Their synthetic tests are in `tests/`. The standard mypy and pytest commands include them. Invoke the metadata and publishing helpers as `python -m scripts.release_metadata` and `python -m scripts.release_publish`. The publisher verifies the committed version, SDK pin and registry hashes, then checks downloaded SDK bytes before it accesses GitHub. The reusable checks reject a release request from a branch. After the publisher downloads the checked assets, it validates their bytes once before it makes GitHub requests.
 
 ## Publish a release
 
@@ -74,19 +74,24 @@ Use `v<major>.<minor>.<patch>` tags. The integration version follows PEP 440 and
 
 Publication uses GitHub's automatic date/version policy for Latest. It does not force every maintenance release to become Latest.
 
-1. Review implementation changes. Run the applicable checks in each repository. Integration releases do not need manual edits to the integration package version or manifest version.
-2. If an SDK update is needed, first publish it from the SDK repository. Update the exact dependency in `pyproject.toml`, then run `uv lock`. Review the new SDK version, URLs and hashes, and any dependency changes. Run `python scripts/prepare_release.py` to synchronize the manifest, then `uv sync --locked` and the checks. An integration-only release keeps the SDK pin and hashes.
-3. Commit and push the changes to the default branch.
-4. Select and push the new version tag. The **Publish release** workflow prepares metadata from that tag. It runs all checks, builds and publishes the assets automatically:
+1. Review implementation changes. If an SDK update is needed, first publish it from the SDK repository. Update the exact dependency in `pyproject.toml`, then run `uv lock`. Review the new SDK version, URLs and hashes, and any dependency changes. An integration-only release keeps the SDK pin and hashes.
+2. Choose the release tag and prepare its version locally. Review the changes, then run `uv sync --locked` and the checks:
 
 ```sh
 release_tag="v<major>.<minor>.<patch>"
+uv run --no-project --python "$(cat .python-version)" python scripts/prepare_release.py --tag "$release_tag"
+```
+
+3. Commit and push the changes to the default branch.
+4. Tag the committed version and push the tag. The **Publish release** workflow checks that the committed metadata matches it. It runs all checks, builds and publishes the assets automatically:
+
+```sh
 git push origin master
 git tag "$release_tag"
 git push origin "$release_tag"
 ```
 
-The workflow generates integration versions and SDK pins. It then checks consistency with the tag, independent SDK requirements and the exact tested commit. It finds existing drafts through authenticated release-list pagination. If the list has no match, it uses a read-only GraphQL lookup. It uses one release ID for creation, reads, uploads and publication. For a new draft, it uses the ID that GitHub returns. It does not require immediate list visibility. Requests retry transient read failures within bounded waits and respect server retry delays. They wait briefly for uploaded asset metadata. An uncertain creation response is reconciled without a second creation request. See the [GitHub release API](https://docs.github.com/en/rest/releases/releases#create-a-release) and [GitHub retry guidance](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api).
+The workflow checks consistency between the committed versions, tag, independent SDK requirements and exact tested commit. It finds existing drafts through authenticated release-list pagination. If the list has no match, it uses a read-only GraphQL lookup. It uses one release ID for creation, reads, uploads and publication. For a new draft, it uses the ID that GitHub returns. It does not require immediate list visibility. Requests retry transient read failures within bounded waits and respect server retry delays. They wait briefly for uploaded asset metadata. An uncertain creation response is reconciled without a second creation request. See the [GitHub release API](https://docs.github.com/en/rest/releases/releases#create-a-release) and [GitHub retry guidance](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api).
 
 The publisher reuses existing assets when their uploaded state, size and SHA-256 digest match. It deletes only expected draft assets that need replacement. Unexpected or duplicate assets stop publication. Before publication, it checks all nine final assets and the remote tag. It sets the GitHub prerelease and Latest flags from the version metadata. Writes recheck the pinned release's draft state. A failure before the final publication attempt leaves the draft unpublished. If the response to that attempt is lost, the publisher reads the release and rechecks all asset bytes and the tag. If it cannot confirm the result, it reports uncertainty. It does not overwrite published releases. The integration workflow does not need a manual ZIP upload or personal access token. It does not publish to PyPI. SDK PyPI publication belongs to the SDK repository.
 
@@ -124,7 +129,7 @@ gh release delete "$release_tag" --repo KennyTangHK/hass-ipguard --cleanup-tag
 
 The local tag remains until you remove it with `git tag -d "$release_tag"`. Deleting a release removes its downloadable assets. It does not uninstall users' existing copies or revert repository commits. Use a new version to ship a correction. See [GitHub release management](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository) and the [GitHub CLI deletion reference](https://cli.github.com/manual/gh_release_delete).
 
-For the next integration version, commit the implementation changes and select a new version tag. The workflow generates release metadata automatically. Adopt SDK updates through the pinned PyPI dependency and reviewed lockfile hashes. Update documentation when behavior or installation steps change. Invalid tags, inconsistent dependency pins, unverified registry hashes and altered artifacts cause failure before publication. Do not move an existing release tag. After a transient failure, rerun the same tag. Use a new tag for source or workflow fixes.
+For the next integration version, prepare and commit the release metadata before selecting the matching tag. Adopt SDK updates through the pinned PyPI dependency and reviewed lockfile hashes. Update documentation when behavior or installation steps change. Invalid tags, inconsistent dependency pins, unverified registry hashes and altered artifacts cause failure before publication. Do not move an existing release tag. After a transient failure, rerun the same tag. Use a new tag for source or workflow fixes.
 
 HACS catalogue inclusion is pending for `KennyTangHK/hass-ipguard`. Keep the repository public. Maintain its description, topics and release assets. Catalogue submission needs passing HACS and Hassfest checks and a published GitHub release. HACS maintainers review the listing request. The HACS validator reads the exact pushed GitHub revision, so it cannot fully validate unpushed local changes. See the [HACS inclusion guide](https://www.hacs.xyz/docs/publish/include/).
 

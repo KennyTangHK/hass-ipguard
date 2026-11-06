@@ -52,15 +52,15 @@ def publisher_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "repository"
     (root / "custom_components/ipguard").mkdir(parents=True)
     (root / "pyproject.toml").write_text(
-        '[project]\nname = "ha-ipguard"\nversion = "0.1.0b1"\n'
+        '[project]\nname = "ha-ipguard"\nversion = "0.1.0b2"\n'
         'dependencies = ["ipguard-api==0.1.0b3"]\n'
     )
     (root / "custom_components/ipguard/manifest.json").write_text(
         json.dumps(
             {
                 "domain": "ipguard",
-                "version": "0.1.0b1",
-                "requirements": ["ipguard-api==0.1.0b1"],
+                "version": "0.1.0b2",
+                "requirements": ["ipguard-api==0.1.0b3"],
             }
         )
         + "\n"
@@ -70,7 +70,7 @@ def publisher_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     )
     (root / "uv.lock").write_text(
         'version = 1\n\n[[package]]\nname = "ha-ipguard"\n'
-        'version = "0.1.0b1"\nsource = { editable = "." }\n'
+        'version = "0.1.0b2"\nsource = { editable = "." }\n'
         'dependencies = [{ name = "ipguard-api" }]\n\n'
         "[package.metadata]\n"
         'requires-dist = [{ name = "ipguard-api", specifier = "==0.1.0b3" }]\n\n'
@@ -694,7 +694,7 @@ def test_checkout_event_and_tested_commit_must_match(event, tested):
     assert validate_commit(COMMIT, COMMIT, COMMIT) == COMMIT
 
 
-def test_main_prepares_tag_and_sdk_pins_before_validating_assets(
+def test_main_validates_tag_and_sdk_pins_before_validating_assets(
     publisher_root, monkeypatch
 ):
     metadata = ReleaseMetadata("0.1.0b2", "0.1.0b3")
@@ -704,8 +704,15 @@ def test_main_prepares_tag_and_sdk_pins_before_validating_assets(
     }
     fake = FakeGh(assets)
     stages = []
-    prepare_release = release_publish.prepare_release
     read_metadata = release_publish.read_metadata
+    original_metadata = {
+        name: (publisher_root / name).read_bytes()
+        for name in (
+            "pyproject.toml",
+            "custom_components/ipguard/manifest.json",
+            "uv.lock",
+        )
+    }
 
     def run(arguments):
         assert arguments == [
@@ -717,10 +724,6 @@ def test_main_prepares_tag_and_sdk_pins_before_validating_assets(
         ]
         stages.append("commit")
         return subprocess.CompletedProcess(arguments, 0, COMMIT + "\n", "")
-
-    def prepare(root, tag):
-        stages.append("prepare")
-        prepare_release(root, tag)
 
     def read(root, tag):
         stages.append("metadata")
@@ -739,16 +742,59 @@ def test_main_prepares_tag_and_sdk_pins_before_validating_assets(
         return GitHub(repository, fake)
 
     monkeypatch.setattr(release_publish, "run_command", run)
-    monkeypatch.setattr(release_publish, "prepare_release", prepare)
     monkeypatch.setattr(release_publish, "read_metadata", read)
     monkeypatch.setattr(release_publish, "expected_assets", validate)
     monkeypatch.setattr(release_publish, "GitHub", github)
     invoke_main(monkeypatch, publisher_root)
-    assert stages == ["commit", "prepare", "metadata", "assets", "github"]
+    assert stages == ["commit", "metadata", "assets", "github"]
+    assert original_metadata == {
+        name: (publisher_root / name).read_bytes() for name in original_metadata
+    }
     assert not fake.draft
     assert (publisher_root / "release-notes.md").read_text() == (
         release_publish.release_notes(metadata)
     )
+
+
+@pytest.mark.parametrize(
+    ("name", "old", "new"),
+    [
+        ("pyproject.toml", 'version = "0.1.0b2"', 'version = "0.1.0b1"'),
+        (
+            "custom_components/ipguard/manifest.json",
+            '"version": "0.1.0b2"',
+            '"version": "0.1.0b1"',
+        ),
+        ("uv.lock", 'version = "0.1.0b2"', 'version = "0.1.0b1"'),
+    ],
+)
+def test_main_rejects_mismatched_tagged_source_without_modification(
+    publisher_root, monkeypatch, name, old, new
+):
+    path = publisher_root / name
+    contents = path.read_text()
+    assert old in contents
+    path.write_text(contents.replace(old, new, 1))
+    before = {
+        path: path.read_bytes() for path in publisher_root.rglob("*") if path.is_file()
+    }
+
+    monkeypatch.setattr(
+        release_publish,
+        "run_command",
+        lambda args: subprocess.CompletedProcess(args, 0, COMMIT + "\n", ""),
+    )
+
+    def unexpected(*args):
+        pytest.fail("Mismatched tagged source must stop before assets or GitHub")
+
+    monkeypatch.setattr(release_publish, "expected_assets", unexpected)
+    monkeypatch.setattr(release_publish, "GitHub", unexpected)
+    with pytest.raises(SystemExit) as result:
+        invoke_main(monkeypatch, publisher_root)
+    assert result.value.code == 1
+    assert all(path.read_bytes() == contents for path, contents in before.items())
+    assert not (publisher_root / "release-notes.md").exists()
 
 
 @pytest.mark.parametrize(
@@ -806,10 +852,10 @@ def test_main_commit_mismatch_cannot_prepare_or_access_github(
         return subprocess.CompletedProcess(arguments, 0, COMMIT + "\n", "")
 
     def unexpected(*args):
-        pytest.fail("Commit mismatch must stop before preparation or GitHub access")
+        pytest.fail("Commit mismatch must stop before metadata or GitHub access")
 
     monkeypatch.setattr(release_publish, "run_command", run)
-    monkeypatch.setattr(release_publish, "prepare_release", unexpected)
+    monkeypatch.setattr(release_publish, "read_metadata", unexpected)
     monkeypatch.setattr(release_publish, "GitHub", unexpected)
     with pytest.raises(SystemExit) as failure:
         invoke_main(monkeypatch, publisher_root, event=event, tested=tested)

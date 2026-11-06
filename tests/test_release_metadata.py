@@ -148,9 +148,7 @@ def test_stable_version_and_install_notes(
     release: tuple[Path, Path, ReleaseMetadata],
 ) -> None:
     root, _, _ = release
-    for filename in ("pyproject.toml", "custom_components/ipguard/manifest.json"):
-        path = root / filename
-        path.write_text(path.read_text().replace("1.2.3b4", "1.2.3"))
+    release_metadata.prepare_release(root, "v1.2.3")
     metadata = read_metadata(root, "v1.2.3")
     assert metadata.prerelease is False
     assert metadata.latest is True

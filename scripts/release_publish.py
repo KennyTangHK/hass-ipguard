@@ -17,7 +17,6 @@ from time import sleep, time
 from urllib.parse import quote
 from zipfile import BadZipFile
 
-from scripts.prepare_release import prepare_release
 from scripts.release_metadata import (
     ROOT,
     ReleaseMetadata,
@@ -717,7 +716,6 @@ def main() -> None:
             response.stdout.strip(), args.event_sha, args.tested_sha
         )
         read_sdk(ROOT)
-        prepare_release(ROOT, args.tag)
         metadata = read_metadata(ROOT, args.tag)
         assets = expected_assets(args.dist, metadata)
         args.notes_file.write_text(release_notes(metadata))

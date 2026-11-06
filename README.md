@@ -44,6 +44,10 @@ Video calls and camera streaming are not supported. Audio conversation, call ans
 - An IPGUARD account with remote access to the entrance and access to its SMS or email verification codes.
 - Internet access, including outbound TCP access to `zmq.campiserveur.com` on ports **5579** and **5577**.
 
+**Enrollment security:** IPGUARD does not offer an encrypted option for the enrollment used by this integration. Your phone number or email address and verification code are sent without encryption. Someone who can observe the connection can read them and could try to register another installation on your account. If the service accepts it, that installation could use your remote door permissions and might replace your existing mobile installation.
+
+The later connection uses ZeroMQ CURVE encryption. Its server public key is received over the unencrypted enrollment connection and is not independently verified. An attacker who can alter that connection could try to substitute a key and impersonate the service.
+
 ## Account setup
 
 Enter your registered email address or an international phone number. These values are examples:
@@ -73,7 +77,7 @@ If a press has an unknown outcome, the command may have reached the board withou
 
 - [Usage and troubleshooting](docs/USAGE.md): Manual installation, logging, updates and removal.
 - [Report an issue](https://github.com/KennyTangHK/hass-ipguard/issues): Describe the problem. Do not share verification codes or Home Assistant `.storage` files.
-- [Development](DEVELOPMENT.md): Python setup, tests, packaging and releases.
+- [Development](https://github.com/KennyTangHK/hass-ipguard/blob/master/DEVELOPMENT.md): Python setup, tests, packaging and releases.
 - [Python API library](https://github.com/KennyTangHK/ipguard-api).
 
 ## Disclaimer and license

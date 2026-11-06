@@ -98,13 +98,13 @@ jobs:
             exit 1
           fi
           echo "sha=$checkout_sha" >> "$GITHUB_OUTPUT"
-      - name: Prepare and validate project and release metadata
+      - name: Validate committed project and release metadata
         id: metadata
         env:
           RELEASE_TAG: ${{ inputs.expected-tag }}
           RELEASE_REF_TYPE: ${{ github.ref_type }}
         run: |
-          args=(--prepare --tag "$RELEASE_TAG" --github-output "$GITHUB_OUTPUT")
+          args=(--tag "$RELEASE_TAG" --github-output "$GITHUB_OUTPUT")
           if [[ -n "$RELEASE_TAG" ]]; then
             args+=(--ref-type "$RELEASE_REF_TYPE")
           fi
