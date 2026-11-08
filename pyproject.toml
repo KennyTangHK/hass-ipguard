@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "ha-ipguard"
 # Committed release version; workflows verify that it matches the tag.
-version = "0.1.3"
+version = "0.1.4"
 description = "IPGUARD door-release buttons and incoming-call events for Home Assistant"
 readme = "README.md"
 requires-python = ">=3.14.2,<3.15"

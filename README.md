@@ -25,6 +25,20 @@ Home Assistant installs the required Python library from PyPI automatically. Use
 
 For installation without HACS, see [Manual installation](docs/USAGE.md#manual-installation).
 
+## Disclaimer and license
+
+This is an independent community project. It is not affiliated with, sponsored by or endorsed by IPGUARD, NACD or Noralsy. It does not claim Home Assistant Core acceptance or an official quality tier.
+
+Use it only with your own authorized account and buildings or doors that you have permission to access and control. Obey applicable laws.
+
+**Use at your own risk.** To the extent permitted by applicable law, the software is provided without warranty. Its authors and contributors accept no responsibility or liability for its use. The warranty and liability limits in the [Apache-2.0 license](LICENSE) apply.
+
+### Enrollment security
+
+IPGUARD does not offer an encrypted option for the enrollment used by this integration. Your phone number or email address and verification code are sent without encryption. Someone who can observe the connection can read them and could try to register another installation on your account. If the service accepts it, that installation could use your remote door permissions and might replace your existing mobile installation.
+
+The later connection uses ZeroMQ CURVE encryption. Its server public key is received over the unencrypted enrollment connection and is not independently verified. An attacker who can alter that connection could try to substitute a key and impersonate the service.
+
 ## Features
 
 - Receive incoming calls as doorbell events over the cloud connection.
@@ -43,10 +57,6 @@ Video calls and camera streaming are not supported. Audio conversation, call ans
 - A Home Assistant installation that is compatible with the selected release. HACS checks the minimum requirement during installation.
 - An IPGUARD account with remote access to the entrance and access to its SMS or email verification codes.
 - Internet access, including outbound TCP access to `zmq.campiserveur.com` on ports **5579** and **5577**.
-
-**Enrollment security:** IPGUARD does not offer an encrypted option for the enrollment used by this integration. Your phone number or email address and verification code are sent without encryption. Someone who can observe the connection can read them and could try to register another installation on your account. If the service accepts it, that installation could use your remote door permissions and might replace your existing mobile installation.
-
-The later connection uses ZeroMQ CURVE encryption. Its server public key is received over the unencrypted enrollment connection and is not independently verified. An attacker who can alter that connection could try to substitute a key and impersonate the service.
 
 ## Account setup
 
@@ -79,11 +89,3 @@ If a press has an unknown outcome, the command may have reached the board withou
 - [Report an issue](https://github.com/KennyTangHK/hass-ipguard/issues): Describe the problem. Do not share verification codes or Home Assistant `.storage` files.
 - [Development](https://github.com/KennyTangHK/hass-ipguard/blob/master/DEVELOPMENT.md): Python setup, tests, packaging and releases.
 - [Python API library](https://github.com/KennyTangHK/ipguard-api).
-
-## Disclaimer and license
-
-This is an independent community project. It is not affiliated with, sponsored by or endorsed by IPGUARD, NACD or Noralsy. It does not claim Home Assistant Core acceptance or an official quality tier.
-
-Use it only with your own authorized account and buildings or doors that you have permission to access and control. Obey applicable laws.
-
-**Use at your own risk.** To the extent permitted by applicable law, the software is provided without warranty. Its authors and contributors accept no responsibility or liability for its use. The warranty and liability limits in the [Apache-2.0 license](LICENSE) apply.

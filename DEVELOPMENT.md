@@ -68,6 +68,20 @@ The checks workflow runs on pull requests and default-branch pushes. The release
 
 Release helpers are in `scripts/`. Their synthetic tests are in `tests/`. The standard mypy and pytest commands include them. Invoke the metadata and publishing helpers as `python -m scripts.release_metadata` and `python -m scripts.release_publish`. The publisher verifies the committed version, SDK pin and registry hashes, then checks downloaded SDK bytes before it accesses GitHub. The reusable checks reject a release request from a branch. After the publisher downloads the checked assets, it validates their bytes once before it makes GitHub requests.
 
+### Repeat the Linux release check
+
+To repeat the Linux release check with Docker:
+
+```sh
+docker build -f scripts/Dockerfile.smoke -t ipguard-ha-smoke scripts
+docker run --rm --network none \
+  -v "$PWD/dist:/releases:ro" -v "$PWD/scripts:/checks:ro" \
+  --entrypoint python ipguard-ha-smoke \
+  /checks/smoke_release.py /releases/ipguard.zip
+```
+
+The image uses the official Home Assistant digest pinned in [`scripts/Dockerfile.smoke`](scripts/Dockerfile.smoke). It installs the native PyZMQ requirement. The check extracts the ZIP into temporary storage. It installs the verified SDK wheel from the mounted release files with network access disabled. It checks the installed SDK bytes and import path, then starts Home Assistant in that temporary directory. It exercises SDK enrollment and release against loopback plaintext/CURVE routers. The runtime has no external network. It mounts no credentials or real configuration directory. The check removes all temporary containers. Repeat the command with `--registration replace` and `--registration decline` after the ZIP argument. This checks both explicit replacement choices.
+
 ## Publish a release
 
 Use `v<major>.<minor>.<patch>` tags. The integration version follows PEP 440 and Home Assistant/HACS's AwesomeVersion. These tags produce normal GitHub releases and do not need prerelease selection in HACS. Keep the beta notices in the README, HACS display name and release notes while the software is in beta. A normal version number does not change the project's maturity.
@@ -132,18 +146,6 @@ The local tag remains until you remove it with `git tag -d "$release_tag"`. Dele
 For the next integration version, prepare and commit the release metadata before selecting the matching tag. Adopt SDK updates through the pinned PyPI dependency and reviewed lockfile hashes. Update documentation when behavior or installation steps change. Invalid tags, inconsistent dependency pins, unverified registry hashes and altered artifacts cause failure before publication. Do not move an existing release tag. After a transient failure, rerun the same tag. Use a new tag for source or workflow fixes.
 
 HACS catalogue inclusion is pending for `KennyTangHK/hass-ipguard`. Keep the repository public. Maintain its description, topics and release assets. Catalogue submission needs passing HACS and Hassfest checks and a published GitHub release. HACS maintainers review the listing request. The HACS validator reads the exact pushed GitHub revision, so it cannot fully validate unpushed local changes. See the [HACS inclusion guide](https://www.hacs.xyz/docs/publish/include/).
-
-To repeat the Linux release check with Docker:
-
-```sh
-docker build -f scripts/Dockerfile.smoke -t ipguard-ha-smoke scripts
-docker run --rm --network none \
-  -v "$PWD/dist:/releases:ro" -v "$PWD/scripts:/checks:ro" \
-  --entrypoint python ipguard-ha-smoke \
-  /checks/smoke_release.py /releases/ipguard.zip
-```
-
-The image uses the official Home Assistant digest pinned in [`scripts/Dockerfile.smoke`](scripts/Dockerfile.smoke). It installs the native PyZMQ requirement. The check extracts the ZIP into temporary storage. It installs the verified SDK wheel from the mounted release files with network access disabled. It checks the installed SDK bytes and import path, then starts Home Assistant in that temporary directory. It exercises SDK enrollment and release against loopback plaintext/CURVE routers. The runtime has no external network. It mounts no credentials or real configuration directory. The check removes all temporary containers. Repeat the command with `--registration replace` and `--registration decline` after the ZIP argument. This checks both explicit replacement choices.
 
 ## Evidence and verification limits
 

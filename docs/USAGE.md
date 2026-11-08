@@ -4,7 +4,7 @@
 
 Use a Home Assistant installation that is compatible with the selected release. HACS checks the minimum requirement during installation. You must have an active IPGUARD account with access to the building. You need the registered phone number or email address and access to the SMS or email verification codes. This integration cannot give you access to more buildings or bypass relay permissions.
 
-Home Assistant needs outbound TCP access to `zmq.campiserveur.com` on port **5579** for enrollment and port **5577** for the authenticated cloud connection. Enrollment uses unencrypted TCP. ZeroMQ CURVE then protects the authenticated connection. Enrollment does not use HTTPS.
+Home Assistant needs outbound TCP access to `zmq.campiserveur.com` on port **5579** for enrollment and port **5577** for the authenticated cloud connection. Enrollment uses unencrypted TCP. ZeroMQ CURVE then protects the authenticated connection. Enrollment does not use HTTPS. See [Enrollment security](../README.md#enrollment-security) for the risks.
 
 Home Assistant installs the required `ipguard-api` package and its dependencies from PyPI. The first startup needs internet access to the package index. The release ZIP is not a fully offline installation bundle.
 
